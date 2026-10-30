@@ -3,13 +3,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { StageToolHost, ToolResult } from '@stage';
 import { runStageTool, STAGE_TOOLS } from '@stage';
 
-/** One line in the chat. */
-export type ChatItem =
-  | { kind: 'user'; id: string; text: string }
-  | { kind: 'assistant'; id: string; text: string; streaming?: boolean }
-  | { kind: 'tool'; id: string; name: string; args: string; status: 'running' | 'done' | 'error'; result?: string; image?: string }
-  | { kind: 'confirm'; id: string; text: string; answer?: boolean }
-  | { kind: 'error'; id: string; text: string };
+import { api } from '../api.ts';
+import type { ChatItem, WorldChat } from '../shared/world.ts';
+import { storableChat } from '../shared/world.ts';
+
+export type { ChatItem } from '../shared/world.ts';
 
 /** What one user turn cost, for the evaluation and the usage ring. */
 export interface TurnStats {
@@ -22,8 +20,6 @@ export interface TurnStats {
   outputTokens: number;
 }
 
-interface Saved { items: ChatItem[]; previousId: string | null }
-
 /** Model turns per request. Near the end the agent is told to wrap up; the last turn may not call tools. */
 const MAX_STEPS = 24;
 const WRAP_UP_AT = MAX_STEPS - 5;
@@ -35,16 +31,36 @@ const uid = () => Math.random().toString(36).slice(2, 10);
  * (it holds the key); every tool runs here, on the live stage and renderer,
  * and its result - pictures included - goes back as the next turn's input.
  */
-export function useAgent(stageId: string, host: StageToolHost, context: () => string) {
-  const key = `viggle-director:chat:${stageId}`;
-  const [items, setItems] = useState<ChatItem[]>(() => load(key).items);
+export function useAgent(worldId: string, initial: WorldChat, host: StageToolHost, context: () => string) {
+  // A chat kept in this browser before worlds stored their own carries over once.
+  const [start] = useState(() => (initial.items.length ? initial : legacyChat(worldId) ?? initial));
+  const [items, setItems] = useState<ChatItem[]>(start.items);
   const [busy, setBusy] = useState(false);
   const [lastTurn, setLastTurn] = useState<TurnStats | null>(null);
-  const previousId = useRef<string | null>(load(key).previousId);
+  const previousId = useRef<string | null>(start.previousResponseId);
   const abort = useRef<AbortController | null>(null);
   const confirms = useRef(new Map<string, (ok: boolean) => void>());
 
-  useEffect(() => { save(key, { items, previousId: previousId.current }); }, [key, items]);
+  // The transcript is part of the world file: saved a moment after it changes, and once more on the way out.
+  // What the server holds: a chat carried over from the browser differs, so it is saved straight away.
+  const saved = useRef(JSON.stringify(initial.items));
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
+  const persist = useCallback(() => {
+    const text = JSON.stringify(itemsRef.current);
+    if (text === saved.current) return;
+    saved.current = text;
+    // Pictures stay in the page: they are large, and the model has already seen them.
+    void api.saveChat(worldId, storableChat({ previousResponseId: previousId.current, items: itemsRef.current, updatedAt: null })).catch(() => { saved.current = ''; });
+  }, [worldId]);
+  useEffect(() => {
+    const t = setTimeout(persist, busy ? 2500 : 400);
+    return () => clearTimeout(t);
+  }, [items, busy, persist]);
+  useEffect(() => {
+    addEventListener('pagehide', persist);
+    return () => { removeEventListener('pagehide', persist); persist(); };
+  }, [persist]);
 
   const patch = (id: string, p: Partial<ChatItem>) => setItems((xs) => xs.map((x) => (x.id === id ? { ...x, ...p } as ChatItem : x)));
   const push = (item: ChatItem) => setItems((xs) => [...xs, item]);
@@ -191,18 +207,16 @@ function costText(args: Record<string, unknown>): string {
   return `Agent 想生成一个${what}${detail ? `：「${detail.slice(0, 80)}」` : ''}，会消耗 ${credits} 额度。`;
 }
 
-function load(key: string): Saved {
+/** The chat an older build kept in localStorage for this stage id, removed once read. */
+function legacyChat(worldId: string): WorldChat | null {
   try {
+    const key = `viggle-director:chat:${worldId}`;
     const raw = localStorage.getItem(key);
-    if (raw) return JSON.parse(raw) as Saved;
-  } catch { /* fresh */ }
-  return { items: [], previousId: null };
-}
-
-function save(key: string, s: Saved): void {
-  try {
-    // Pictures stay out of storage; the transcript keeps the words. Unanswered confirms cannot survive a reload.
-    const items = s.items.filter((x) => x.kind !== 'confirm' || x.answer !== undefined).map((x) => (x.kind === 'tool' ? { ...x, image: undefined, status: x.status === 'running' ? 'error' as const : x.status } : x));
-    localStorage.setItem(key, JSON.stringify({ items, previousId: s.previousId }));
-  } catch { /* full or private: not remembered */ }
+    if (!raw) return null;
+    const old = JSON.parse(raw) as { items?: ChatItem[]; previousId?: string | null };
+    localStorage.removeItem(key);
+    return old.items?.length ? { items: old.items, previousResponseId: old.previousId ?? null, updatedAt: null } : null;
+  } catch {
+    return null;
+  }
 }

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { StageAspect, StageRenderer, StageView } from '@stage';
 import { ASPECTS, nextFreeStart, runStageTool, STAGE_TOOLS } from '@stage';
 
+import { api } from './api.ts';
 import { createDirectorHost } from './agentHost.ts';
 
 import type { ExportProgress } from './exporter.ts';
@@ -16,16 +17,37 @@ import { addClip, addShot, clamp, uid, upsertKey } from './ops.ts';
 import type { LibraryCharacter, LibraryMotion, LibraryScene } from './shared/library.ts';
 import { Timeline } from './Timeline.tsx';
 import { linkProps } from './router.ts';
+import type { WorldChat } from './shared/world.ts';
+import { isEmptyWorld } from './shared/world.ts';
 import { ToolConsole } from './ToolConsole.tsx';
 import { AgentPanel } from './agent/AgentPanel.tsx';
 import { useAgent } from './agent/useAgent.ts';
 import { useStage } from './useStage.ts';
 import { Viewport } from './Viewport.tsx';
+import { WorldBrowser } from './WorldBrowser.tsx';
 
 const SELECTION_TITLE = { none: '片场', character: '角色', clip: '动作片段', shot: '镜头', key: '镜头关键帧' } as const;
 const SAVE_LABEL ={ saved: '已保存', pending: '待保存…', saving: '保存中…', error: '保存失败', conflict: '版本冲突' } as const;
 
-export function Studio({ stageId, live, agentModel }: { stageId: string; live: boolean; agentModel: string | null }) {
+interface StudioProps { stageId: string; nodeId: string | null; live: boolean; agentModel: string | null }
+
+/** One World project in the 3D Studio: the world file is read first, for the conversation that built it. */
+export function Studio(props: StudioProps) {
+  const [chat, setChat] = useState<{ chat: WorldChat; empty: boolean; coverAt: string | null } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    api.getWorld(props.stageId)
+      .then((w) => { if (live) setChat({ chat: w.chat, empty: isEmptyWorld(w), coverAt: w.cover?.updatedAt ?? null }); })
+      .catch((e: unknown) => { if (live) setError(e instanceof Error ? e.message : String(e)); });
+    return () => { live = false; };
+  }, [props.stageId]);
+  if (error) return <div className="center error">无法打开 World：{error} <a {...linkProps('/canvas')}>返回画布</a></div>;
+  if (!chat) return <div className="center muted">加载 World…</div>;
+  return <StudioEditor {...props} initialChat={chat.chat} fresh={chat.empty} coverAt={chat.coverAt} />;
+}
+
+function StudioEditor({ stageId, nodeId, live, agentModel, initialChat, fresh, coverAt }: StudioProps & { initialChat: WorldChat; fresh: boolean; coverAt: string | null }) {
   const store = useStage(stageId);
   const { doc, update } = store;
   const [renderer, setRenderer] = useState<StageRenderer | null>(null);
@@ -36,7 +58,9 @@ export function Studio({ stageId, live, agentModel }: { stageId: string; live: b
   const [activeShot, setActiveShot] = useState<string | null>(null);
   const [exporting, setExporting] = useState<{ label: string; progress: ExportProgress | null; abort: AbortController } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [library, setLibrary] = useState<LibraryTab | null>('scene');
+  // A new world opens agent-first: the library stays shut until asked for.
+  const [library, setLibrary] = useState<LibraryTab | null>(fresh ? null : 'scene');
+  const [history, setHistory] = useState(false);
 
   // The active shot: the one picked, else the first.
   const shot = doc?.shots.find((s) => s.id === activeShot) ?? doc?.shots[0] ?? null;
@@ -189,8 +213,38 @@ export function Studio({ stageId, live, agentModel }: { stageId: string; live: b
     const sel = s?.kind === 'character' ? `${d?.characters.find((k) => k.id === s.id)?.name ?? s.id} (${s.id})` : s ? JSON.stringify(s) : 'nothing';
     return `[Editor] playhead ${c.time.toFixed(2)}s; selected: ${sel}; active shot: ${c.shot ?? 'none'}; viewport: ${c.view.kind === 'shot' ? 'through the active shot' : 'free camera'}.`;
   }, [store]);
-  const agent = useAgent(stageId, host, editorContext);
+  const agent = useAgent(stageId, initialChat, host, editorContext);
   useEffect(() => { if (import.meta.env.DEV) (window as unknown as { __agentLast?: unknown }).__agentLast = agent.lastTurn; }, [agent.lastTurn]);
+
+  // ── Cover ────────────────────────────────────────────────────────────────
+  // The world's card on the canvas and in history: a still taken a few seconds after the stage
+  // settles, only when it changed since the last cover (so opening a world never replaces it), and
+  // through a shot when the world has one - the agent ends each turn previewing its main shot.
+  const coverFrom = useRef(coverAt ?? '');
+  const openedAt = useRef(performance.now());
+  useEffect(() => {
+    if (!renderer || !doc?.scene || playing || agent.busy || exporting) return;
+    if (doc.updatedAt <= coverFrom.current) return;
+    const hasShot = doc.shots.some((s) => s.keys.length);
+    if (hasShot && view.kind !== 'shot') return;
+    let timer: ReturnType<typeof setTimeout>;
+    const attempt = async () => {
+      const state = renderer.getAssetState();
+      // Assets still arriving, or the scene still fading in after the editor opened: try again shortly.
+      if (state.sceneLoading || state.loadingCharacters.length || state.loadingClips.length || performance.now() - openedAt.current < COVER_SETTLE_MS) {
+        timer = setTimeout(() => void attempt(), 1500);
+        return;
+      }
+      const at = doc.updatedAt;
+      try {
+        const still = await renderer.capture(ASPECTS[doc.aspect], 640);
+        await api.saveCover(stageId, still.toDataURL('image/jpeg', 0.82));
+        coverFrom.current = at;
+      } catch { /* next change tries again */ }
+    };
+    timer = setTimeout(() => void attempt(), 3000);
+    return () => clearTimeout(timer);
+  }, [renderer, doc?.updatedAt, doc?.scene, doc?.aspect, doc?.shots, view, playing, agent.busy, exporting, stageId]);
 
   // ── Keys ─────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -223,6 +277,7 @@ export function Studio({ stageId, live, agentModel }: { stageId: string; live: b
           {/* Top left: the app pill, as the reference product's "3D Studio 2.0" */}
           <div className="float pill-group top-left">
             <a className="pill brand" {...linkProps('/canvas')} title="回到画布"><Logo /><span className="divider" /><span className="brand-name">World</span></a>
+            <button className="pill icon" onClick={() => setHistory(true)} title="历史 World：打开、加载或复制以前的 World"><Icon name="history" /></button>
             <div className="pill title-pill">
               <input className="title-input" value={doc.title} onChange={(e) => update((d) => ({ ...d, title: e.target.value }))} />
               <span className={`save-dot ${store.saveStatus}`} title={SAVE_LABEL[store.saveStatus]} />
@@ -250,6 +305,14 @@ export function Studio({ stageId, live, agentModel }: { stageId: string; live: b
             <button className="pill" disabled={!shot || !!exporting} onClick={() => void runExport('png')}><Icon name="image" />导出当前帧</button>
             <button className="pill primary" disabled={!shot || !!exporting} onClick={() => void runExport('mp4')}><Icon name="download" />导出镜头视频</button>
           </div>
+
+          {!doc.scene && !doc.characters.length && (
+            <div className="empty-hint">
+              <Icon name="globe" size={28} />
+              <strong>这是一个新的 World</strong>
+              <span>在右侧告诉 Agent 你想拍什么，它会选场景、放角色、编排动作、架好镜头。<br />也可以从左侧 ＋ 打开素材库自己搭。</span>
+            </div>
+          )}
 
           {/* Left rail */}
           <nav className="float rail">
@@ -304,10 +367,24 @@ export function Studio({ stageId, live, agentModel }: { stageId: string; live: b
           onPlay={() => setPlaying((p) => !p)} onSelectKey={selectKey} />
       </section>
 
-      <AgentPanel items={agent.items} busy={agent.busy} model={agentModel} lastTurn={agent.lastTurn}
+      <AgentPanel items={agent.items} busy={agent.busy} model={agentModel} lastTurn={agent.lastTurn} fresh={!doc.scene && !doc.characters.length}
         onSend={(m) => void agent.send(m)} onStop={agent.stop} onReset={agent.reset} onAnswer={agent.answer}
         bench={<ToolConsole host={host} shotId={shot?.id ?? null} />} />
 
+      {history && (
+        <div className="drawer" onClick={(e) => { if (e.target === e.currentTarget) setHistory(false); }}>
+          <div className="drawer-box">
+            <header className="drawer-head">
+              <Icon name="history" size={20} />
+              <h2>历史 World</h2>
+              <div className="spacer" />
+              <a className="pill sm" {...linkProps('/canvas/world')}>全部 World</a>
+              <button className="pill sm icon" onClick={() => setHistory(false)} title="关闭"><Icon name="x" size={16} /></button>
+            </header>
+            <WorldBrowser currentId={stageId} nodeId={nodeId} onClose={() => setHistory(false)} />
+          </div>
+        </div>
+      )}
       {notice && <div className="toast">{notice}</div>}
       {exporting && (
         <div className="modal">
@@ -324,4 +401,6 @@ export function Studio({ stageId, live, agentModel }: { stageId: string; live: b
 }
 
 const round = (v: number) => Math.round(v * 100) / 100;
+/** The scene fades in when it loads; a cover taken sooner is fog. */
+const COVER_SETTLE_MS = 8000;
 const slug = (s: string) => s.trim().replace(/[\\/:*?"<>|\s]+/g, '-').slice(0, 40) || 'stage';

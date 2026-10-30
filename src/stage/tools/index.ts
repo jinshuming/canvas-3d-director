@@ -410,17 +410,18 @@ export const STAGE_TOOLS: StageTool[] = [
   {
     name: 'set_timeline',
     effect: 'edit',
-    description: 'Timeline length (seconds), frame rate and frame aspect.',
-    input_schema: { type: 'object', properties: { duration: NUM, fps: { type: 'number', enum: [24, 25, 30] }, aspect: { type: 'string', enum: Object.keys(ASPECTS) } } },
+    description: 'The world\'s `title`, and the timeline: length (seconds), frame rate and frame aspect.',
+    input_schema: { type: 'object', properties: { title: { type: 'string', description: 'A short name for the world, in the user\'s language.' }, duration: NUM, fps: { type: 'number', enum: [24, 25, 30] }, aspect: { type: 'string', enum: Object.keys(ASPECTS) } } },
     async run(i, host) {
       host.update((d) => ({
         ...d,
+        ...(typeof i.title === 'string' && i.title.trim() ? { title: i.title.trim().slice(0, 40) } : {}),
         ...(typeof i.duration === 'number' ? { duration: clamp(i.duration, 1, 600) } : {}),
         ...(i.fps ? { fps: i.fps } : {}),
         ...(i.aspect ? { aspect: i.aspect as StageAspect } : {}),
       }));
       const d = host.getDoc();
-      return ok({ duration: d.duration, fps: d.fps, aspect: d.aspect });
+      return ok({ title: d.title, duration: d.duration, fps: d.fps, aspect: d.aspect });
     },
   },
 

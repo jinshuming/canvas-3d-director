@@ -54,3 +54,6 @@
 .ag-bench .composer { background: #181818; }
 .ag-zoom { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; background: rgba(0, 0, 0, 0.8); cursor: zoom-out; }
 .ag-zoom img { max-width: 90vw; max-height: 90vh; border-radius: 12px; }
+.ag-lead { margin: -12px 0 22px; color: #a1a1a6; font-size: 14.5px; line-height: 1.55; }
+.ag-suggest.starters .cv-card { transform: none; }
+.ag-suggest.starters .cv-card > span:nth-of-type(2) { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }

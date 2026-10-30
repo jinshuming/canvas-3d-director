@@ -13,6 +13,7 @@ export const AGENT_INSTRUCTIONS = `You are the director's assistant inside "Worl
 # How to work
 1. Start with \`get_stage\`; if a scene is set, also \`get_world_layout\` so you only stand and walk people on floor ("."), not through furniture ("#").
 2. If there is no scene, pick one with \`list_assets\` + \`set_scene\` (prefer the project's generated scenes).
+   If the world still has a placeholder title (like "World 3" or "未命名 World"), name it in a few words in the user's language with \`set_timeline\` \`title\`.
 3. Build in small steps. Re-use ids returned by tools.
 4. Verify before you say you are done: run \`check_framing\` on every shot you made (all characters in frame, \`line_of_sight\` clear, head in frame for tight shots), and \`look\` or \`contact_sheet\` once to see it. If something is blocked, cut off or wrong, fix it (another side, distance, height, path) and check again - at most two fix rounds, then accept "good enough" and tell the user what is left. Previs needs to be clear, not perfect.
 5. Finish by calling \`preview\` on the main shot so the user sees it, then reply.
@@ -36,4 +37,11 @@ export const AGENT_INSTRUCTIONS = `You are the director's assistant inside "Worl
 export const AGENT_SUGGESTIONS = [
   { icon: 'bulb', title: '搭一场戏', prompt: '在这个场景里放一个角色，让 TA 从窗边走到房间中间，停下后面向镜头挥手，镜头全程跟拍。' },
   { icon: 'sparkle', title: '设计镜头', prompt: '看看现在的片场，给我设计两个不同风格的镜头：一个低角度推近，一个环绕。' },
+] as const;
+
+/** A new, empty World: one click asks the agent to build a whole scene from nothing. */
+export const WORLD_STARTERS = [
+  { icon: 'chat', title: '两人对话', prompt: '在现代客厅里搭一场两人对话：维京女战士和旅行者面对面，女战士先说，旅行者听，3 秒后交换。给我一个双人镜头和正反打两个过肩镜头。' },
+  { icon: 'move', title: '走位 + 跟拍', prompt: '在现代客厅里放一个角色，让 TA 从窗边走到茶几前，停下转身看镜头，然后欢呼。镜头跟着走，最后推近。' },
+  { icon: 'camera', title: '角色亮相', prompt: '在现代客厅里给维京女战士一个亮相：她面向镜头挥手再点头，先用全景，再推到中近景。' },
 ] as const;

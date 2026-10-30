@@ -1,6 +1,7 @@
 import type { StageDoc } from '@stage';
 
 import type { GenJob, Library } from './shared/library.ts';
+import type { WorldChat, WorldFile, WorldSummary } from './shared/world.ts';
 
 export class ApiError extends Error {
   constructor(readonly status: number, message: string, readonly code?: string, readonly body?: unknown) {
@@ -21,10 +22,17 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export const api = {
   config: () => call<{ live: boolean; agent: { model: string } | null }>('/api/config'),
-  listStages: () => call<Array<{ id: string; title: string; updatedAt: string }>>('/api/stages'),
-  createStage: (title: string) => call<StageDoc>('/api/stages', { method: 'POST', body: JSON.stringify({ title }) }),
-  getStage: (id: string) => call<StageDoc>(`/api/stages/${id}`),
-  saveStage: (doc: StageDoc, baseVersion: number) => call<StageDoc>(`/api/stages/${doc.id}`, { method: 'PUT', body: JSON.stringify({ baseVersion, doc }) }),
+  listWorlds: () => call<WorldSummary[]>('/api/worlds'),
+  /** A new world; `copyOf` starts it from another world's stage (with a fresh conversation). */
+  createWorld: (opts: { title?: string; copyOf?: string } = {}) => call<WorldFile>('/api/worlds', { method: 'POST', body: JSON.stringify(opts) }),
+  getWorld: (id: string) => call<WorldFile>(`/api/worlds/${id}`),
+  renameWorld: (id: string, title: string) => call<WorldSummary>(`/api/worlds/${id}`, { method: 'PATCH', body: JSON.stringify({ title }) }),
+  /** Moves the world to the server's trash folder. */
+  deleteWorld: (id: string) => call<{ ok: true }>(`/api/worlds/${id}`, { method: 'DELETE' }),
+  getStage: (id: string) => call<StageDoc>(`/api/worlds/${id}/stage`),
+  saveStage: (doc: StageDoc, baseVersion: number) => call<StageDoc>(`/api/worlds/${doc.id}/stage`, { method: 'PUT', body: JSON.stringify({ baseVersion, doc }) }),
+  saveChat: (id: string, chat: WorldChat) => call<{ updatedAt: string }>(`/api/worlds/${id}/chat`, { method: 'PUT', body: JSON.stringify({ chat }) }),
+  saveCover: (id: string, dataUrl: string) => call<{ coverUrl: string }>(`/api/worlds/${id}/cover`, { method: 'PUT', body: JSON.stringify({ dataUrl }) }),
   library: () => call<Library>('/api/library'),
   generate: (kind: GenJob['kind'], input: Record<string, unknown>) => call<GenJob>(`/api/gen/${kind}`, { method: 'POST', body: JSON.stringify(input) }),
   dismissJob: (id: string) => call<{ ok: true }>(`/api/jobs/${id}`, { method: 'DELETE' }),
