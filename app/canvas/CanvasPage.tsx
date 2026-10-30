@@ -56,6 +56,9 @@ export function CanvasPage() {
   }, []);
 
   const { view } = state;
+  // The whole canvas UI scales with the window, in the reference product's proportions; the board draws at view.zoom × ui.
+  const ui = useUiScale();
+  const scale = view.zoom * ui;
   const setView = (v: Partial<CanvasState['view']>) => setState((s) => ({ ...s, view: { ...s.view, ...v } }));
 
   // ── Pan, zoom, drag ──────────────────────────────────────────────────────
@@ -98,7 +101,7 @@ export function CanvasPage() {
     e.stopPropagation();
     setSelected(n.id);
     setMenu(false);
-    const x0 = e.clientX, y0 = e.clientY, nx = n.x, ny = n.y, z = view.zoom;
+    const x0 = e.clientX, y0 = e.clientY, nx = n.x, ny = n.y, z = scale;
     const move = (ev: PointerEvent) => setState((s) => ({ ...s, nodes: s.nodes.map((k) => (k.id === n.id ? { ...k, x: nx + (ev.clientX - x0) / z, y: ny + (ev.clientY - y0) / z } : k)) }));
     const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); };
     addEventListener('pointermove', move);
@@ -121,7 +124,7 @@ export function CanvasPage() {
   // ── Adding nodes ─────────────────────────────────────────────────────────
   const centre = () => {
     const el = board.current!;
-    return { x: (el.clientWidth / 2 - view.x) / view.zoom, y: (el.clientHeight / 2 - view.y) / view.zoom };
+    return { x: (el.clientWidth / 2 - view.x) / scale, y: (el.clientHeight / 2 - view.y) / scale };
   };
   const add = async (kind: NodeKind, extra: Partial<CanvasNode> = {}) => {
     setMenu(false);
@@ -151,17 +154,19 @@ export function CanvasPage() {
     if (!el || !state.nodes.length) return;
     const minX = Math.min(...state.nodes.map((n) => n.x)), maxX = Math.max(...state.nodes.map((n) => n.x + n.w));
     const minY = Math.min(...state.nodes.map((n) => n.y - 28)), maxY = Math.max(...state.nodes.map((n) => n.y + n.h));
-    const zoom = Math.min(1.4, Math.max(0.25, Math.min((el.clientWidth - 240) / (maxX - minX), (el.clientHeight - 240) / (maxY - minY))));
-    setState((s) => ({ ...s, view: { zoom, x: el.clientWidth / 2 - ((minX + maxX) / 2) * zoom, y: el.clientHeight / 2 - ((minY + maxY) / 2) * zoom } }));
+    const fitted = Math.min((el.clientWidth - 240 * ui) / (maxX - minX), (el.clientHeight - 240 * ui) / (maxY - minY)) / ui;
+    const zoom = Math.min(1.4, Math.max(0.25, fitted));
+    const sc = zoom * ui;
+    setState((s) => ({ ...s, view: { zoom, x: el.clientWidth / 2 - ((minX + maxX) / 2) * sc, y: el.clientHeight / 2 - ((minY + maxY) / 2) * sc } }));
   };
 
   const byId = new Map(state.nodes.map((n) => [n.id, n]));
 
   return (
-    <div className="cv-root">
+    <div className="cv-root" style={{ '--cv-ui': ui } as React.CSSProperties}>
       <section className="cv-board" ref={board} onPointerDown={onBoardPointerDown}
-        style={{ backgroundPosition: `${view.x}px ${view.y}px`, backgroundSize: `${22 * view.zoom}px ${22 * view.zoom}px` }}>
-        <div className="cv-world" style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom})` }}>
+        style={{ backgroundPosition: `${view.x}px ${view.y}px`, backgroundSize: `${22 * scale}px ${22 * scale}px` }}>
+        <div className="cv-world" style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${scale})` }}>
           <svg className="cv-edges" width="1" height="1">
             {state.edges.map((e) => {
               const a = byId.get(e.from), b = byId.get(e.to);
@@ -367,4 +372,21 @@ function seed(): CanvasState {
     edges: [{ from: 'seed_text', to: 'seed_video' }, { from: 'seed_img', to: 'seed_3d' }],
     view: { x: 120, y: 60, zoom: 1 },
   };
+}
+
+/**
+ * The canvas UI's scale: the reference product's proportions at any window size (its top
+ * pills are about 5.6% of the window height, the Agent column about a quarter
+ * of its width), so a small window shows the same layout, smaller. 1 at a
+ * 1000 × 1600 window and up; never below 0.5, about where text stops being readable.
+ */
+function useUiScale(): number {
+  const read = () => Math.min(1, Math.max(0.5, Math.min(innerHeight / 1000, innerWidth / 1600)));
+  const [ui, setUi] = useState(read);
+  useEffect(() => {
+    const on = () => setUi(read());
+    addEventListener('resize', on);
+    return () => removeEventListener('resize', on);
+  }, []);
+  return ui;
 }

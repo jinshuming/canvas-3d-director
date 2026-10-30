@@ -1,5 +1,13 @@
 /* the reference product's canvas: a black dotted board, floating dark pills, and the Agent column on the right. */
-.cv-root { height: 100%; display: grid; grid-template-columns: 1fr 400px; background: #000; overflow: hidden; color: #f4f4f5; }
+.cv-root { height: 100%; display: grid; grid-template-columns: 1fr calc(500px * var(--cv-ui, 1)); background: #000; overflow: hidden; color: #f4f4f5; }
+/* The floating UI and the Agent column scale as one with the window (--cv-ui, set by the page); the board scales in its own transform. */
+.cv-root .cv-float, .cv-root > .cv-chat { zoom: var(--cv-ui, 1); }
+.cv-root > .cv-chat { min-width: 0; overflow: hidden; }
+/* the reference product's chat text is large next to its compact chrome (about a third of a top pill's height). */
+.cv-root > .cv-chat .cv-chat-head strong { font-size: 19px; }
+.cv-root > .cv-chat .cv-msg { font-size: 18px; }
+.cv-root > .cv-chat .cv-tip { font-size: 16px; }
+.cv-root > .cv-chat .cv-composer textarea { font-size: 19px; }
 .cv-board {
   position: relative; overflow: hidden; cursor: default; touch-action: none;
   background-color: #000; background-image: radial-gradient(rgba(255, 255, 255, 0.11) 1px, transparent 1.2px);
@@ -121,9 +129,4 @@
 .cv-send { width: 46px; height: 46px; border-radius: 50%; border: 0; display: grid; place-items: center; background: #3a3a3c; color: #a1a1a6; }
 .cv-send.on { background: #f4f4f5; color: #0a0a0a; }
 
-@media (max-width: 1280px) {
-  .cv-root { grid-template-columns: 1fr 340px; }
-  .cv-top-right .cv-pill span { display: none; }
-  .cv-hello h1 { font-size: 30px; }
-}
 .cv-world-info .cv-world-prompt { color: rgba(255, 255, 255, 0.55); font-style: italic; }
