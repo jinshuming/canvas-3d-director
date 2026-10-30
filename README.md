@@ -18,9 +18,11 @@ npm run dev                  # http://localhost:5193/canvas
 
 | 路径 | 页面 |
 |---|---|
-| `/canvas` | 仿 TapNow 画布，用于演示。左侧 ＋ → World 新建一个世界节点，点「Enter World」进入导演台 |
-| `/canvas/world` | 所有 World（片场）的列表 |
-| `/canvas/world/<id>` | 3D 导演台，右侧是 Agent 对话面板 |
+| `/canvas` | 仿 TapNow 画布，用于演示。左侧 ＋ → World 新建一个 World 节点（同时新建一个 World 工程），点「开始搭建」进入 |
+| `/canvas/world` | 所有 World 工程：搜索、打开、复制、删除（移到回收站） |
+| `/canvas/world/<id>?node=<节点>` | 3D 导演台，右侧是 Agent 对话面板。左上角「历史」按钮可以把以前的 World 加载到当前节点 |
+
+新的 World 打开后默认由 Agent 主导：素材库先收起，输入框自动获得焦点，点一下示例卡片就能让 Agent 从零搭出一场戏，Agent 还会给 World 起名。每个 World 是一个工程文件，保存片场、对话和封面，格式见 `docs/WORLD_FORMAT.md`。
 
 ## 结构
 
@@ -34,9 +36,10 @@ npm run dev                  # http://localhost:5193/canvas
 | `app/server/plugin.ts` | Vite 中间件：<br>- 片场存储，带版本号乐观锁，冲突返回 409<br>- 素材库<br>- Viggle 生成任务：服务端轮询，完成后把文件转存到 `.data/files`<br>- Agent 请求转发到 OpenAI Responses API，流式返回 |
 | `app/agent/` | Agent 循环（在页面里执行工具，结果连同截图回传给模型）和对话面板 |
 | `eval/` | 评测：在页面里像用户一样发需求，再用程序检查片场。结果见 `eval/REPORT.md` |
-| `docs/` | MVP 方案（`MVP.md`）、Agent 工具目录（`AGENT_TOOLS.md`） |
+| `app/shared/world.ts` | World 工程文件的类型、读取与升级、复制、摘要（测试在 `world.test.ts`） |
+| `docs/` | MVP 方案（`MVP.md`）、Agent 工具目录（`AGENT_TOOLS.md`）、World 工程文件格式（`WORLD_FORMAT.md`） |
 
-运行数据都在 `.data/`（已 gitignore）：`stages/*.json`、`library.json`、`files/`。
+运行数据都在 `.data/`（已 gitignore）：`worlds/<id>/`（World 工程文件和封面）、`trash/`、`library.json`、`files/`。
 
 ## 操作
 

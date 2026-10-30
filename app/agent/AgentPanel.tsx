@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import type { IconName } from '../icons.tsx';
 import { Icon, Logo } from '../icons.tsx';
-import { AGENT_SUGGESTIONS } from '../shared/agentPrompt.ts';
+import { AGENT_SUGGESTIONS, WORLD_STARTERS } from '../shared/agentPrompt.ts';
 import '../canvas/canvas.css';
 import './agent.css';
 import type { ChatItem, TurnStats } from './useAgent.ts';
@@ -21,6 +21,8 @@ interface Props {
   busy: boolean;
   model: string | null;
   lastTurn: TurnStats | null;
+  /** The world is empty: greet with starters that build a scene from nothing. */
+  fresh?: boolean;
   onSend: (text: string) => void;
   onStop: () => void;
   onReset: () => void;
@@ -29,12 +31,15 @@ interface Props {
   bench: React.ReactNode;
 }
 
-export function AgentPanel({ items, busy, model, lastTurn, onSend, onStop, onReset, onAnswer, bench }: Props) {
+export function AgentPanel({ items, busy, model, lastTurn, fresh = false, onSend, onStop, onReset, onAnswer, bench }: Props) {
   const [text, setText] = useState('');
   const [wide, setWide] = useState(false);
   const [showBench, setShowBench] = useState(false);
   const [zoom, setZoom] = useState<string | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
+  const box = useRef<HTMLTextAreaElement>(null);
+  // A new world is built by talking: the cursor starts in the box.
+  useEffect(() => { if (fresh && model) box.current?.focus(); }, [fresh, model]);
   const title = items.find((i) => i.kind === 'user')?.text;
 
   useEffect(() => {
@@ -63,11 +68,22 @@ export function AgentPanel({ items, busy, model, lastTurn, onSend, onStop, onRes
         <div className="cv-chat-body ag-body" ref={scroller}>
           {items.length === 0 ? (
             <div className="cv-hello">
-              <h2><Logo size={30} /> Hi there!</h2>
-              <h1>What are we making today?</h1>
-              <div className="ag-suggest">
-                {AGENT_SUGGESTIONS.map((s, i) => (
-                  <button key={s.title} className={`cv-card ${i % 2 ? 'tilt-r' : 'tilt-l'}`} onClick={() => setText(s.prompt)}>
+              {fresh ? (
+                <>
+                  <h2><Logo size={30} /> 新的 World</h2>
+                  <h1>想拍一场什么样的戏？</h1>
+                  <p className="ag-lead">描述人物、地点、动作和镜头，我来选场景、放角色、编排动作、架好机位，做完给你预览。</p>
+                </>
+              ) : (
+                <>
+                  <h2><Logo size={30} /> Hi there!</h2>
+                  <h1>What are we making today?</h1>
+                </>
+              )}
+              <div className={`ag-suggest ${fresh ? 'starters' : ''}`}>
+                {(fresh ? WORLD_STARTERS : AGENT_SUGGESTIONS).map((s, i) => (
+                  <button key={s.title} className={`cv-card ${fresh ? '' : i % 2 ? 'tilt-r' : 'tilt-l'}`} disabled={fresh && !model}
+                    onClick={() => (fresh && model ? onSend(s.prompt) : setText(s.prompt))}>
                     <span className="ag-card-head"><Icon name={s.icon as IconName} size={20} /><strong>{s.title}</strong></span>
                     <span>{s.prompt}</span>
                     <Icon name="arrowRight" size={16} className="cv-card-arrow" />
@@ -89,9 +105,9 @@ export function AgentPanel({ items, busy, model, lastTurn, onSend, onStop, onRes
       )}
 
       <div className="cv-composer">
-        <textarea rows={2} value={text} disabled={!model} onChange={(e) => setText(e.target.value)}
+        <textarea ref={box} rows={2} value={text} disabled={!model} onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); } }}
-          placeholder={model ? 'Type anything' : 'Agent 未配置'} />
+          placeholder={model ? (fresh && !items.length ? '描述你想搭的场景…' : 'Type anything') : 'Agent 未配置'} />
         <div className="cv-composer-row">
           <button className="cv-pill cv-square sm" title="添加参考（即将支持）"><Icon name="plus" size={18} /></button>
           <button className="cv-ghost" title="手动模式：每次由你发起"><Icon name="hand" size={20} /></button>

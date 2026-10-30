@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import type { StageDoc } from '@stage';
-
 import { api } from '../api.ts';
+import type { WorldSummary } from '../shared/world.ts';
 import type { IconName } from '../icons.tsx';
 import { Icon, Logo } from '../icons.tsx';
-import { navigate } from '../router.ts';
+import { navigate, worldPath } from '../router.ts';
 import './canvas.css';
 import type { CanvasNode, CanvasState, NodeKind } from './model.ts';
 import { loadCanvas, newId, NODE_LABEL, NODE_SIZE, saveCanvas } from './model.ts';
@@ -25,6 +24,16 @@ export function CanvasPage() {
 
   useEffect(() => { saveCanvas(state); }, [state]);
 
+  // What each World node shows: its project's summary, fetched again when the page comes back into view.
+  const [worlds, setWorlds] = useState<Map<string, WorldSummary> | null>(null);
+  useEffect(() => {
+    let live = true;
+    const load = () => api.listWorlds().then((list) => { if (live) setWorlds(new Map(list.map((w) => [w.id, w]))); }).catch(() => {});
+    void load();
+    addEventListener('focus', load);
+    return () => { live = false; removeEventListener('focus', load); };
+  }, []);
+
   // The seed's picture and World come from this project's own assets: a scene's panorama, and the latest World that has a scene.
   useEffect(() => {
     if (!state.nodes.some((n) => n.kind === 'image' && !n.src)) return;
@@ -33,18 +42,15 @@ export function CanvasPage() {
       if (pano) setState((s) => ({ ...s, nodes: s.nodes.map((n) => (n.kind === 'image' && !n.src ? { ...n, src: pano } : n)) }));
     }).catch(() => {});
     if (state.nodes.some((n) => n.kind === 'world')) return;
-    void api.listStages().then(async (list) => {
-      for (const s of list) {
-        const d = await api.getStage(s.id);
-        if (!d.scene) continue;
-        const [w, h] = NODE_SIZE.world;
-        setState((st) => (st.nodes.some((n) => n.kind === 'world') ? st : {
-          ...st,
-          nodes: [...st.nodes, { id: 'seed_world', kind: 'world', x: 720, y: 440, w, h, stageId: d.id, title: d.title }],
-          edges: [...st.edges, { from: 'seed_img', to: 'seed_world' }],
-        }));
-        return;
-      }
+    void api.listWorlds().then((list) => {
+      const w = list.find((x) => x.sceneName);
+      if (!w) return;
+      const [nw, nh] = NODE_SIZE.world;
+      setState((st) => (st.nodes.some((n) => n.kind === 'world') ? st : {
+        ...st,
+        nodes: [...st.nodes, { id: 'seed_world', kind: 'world', x: 720, y: 440, w: nw, h: nh, worldId: w.id, title: w.title }],
+        edges: [...st.edges, { from: 'seed_img', to: 'seed_world' }],
+      }));
     }).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once, on the seed
   }, []);
@@ -122,10 +128,12 @@ export function CanvasPage() {
     const [w, h] = NODE_SIZE[kind];
     const c = centre();
     const node: CanvasNode = { id: newId(), kind, x: c.x - w / 2 + (Math.random() - 0.5) * 60, y: c.y - h / 2 + (Math.random() - 0.5) * 60, w, h, ...extra };
-    if (kind === 'world' && !node.stageId) {
-      const doc = await api.createStage(`World ${state.nodes.filter((n) => n.kind === 'world').length + 1}`);
-      node.stageId = doc.id;
-      node.title = doc.title;
+    if (kind === 'world' && !node.worldId) {
+      // Every World node is its own project file.
+      const w = await api.createWorld({ title: `World ${state.nodes.filter((n) => n.kind === 'world').length + 1}` });
+      node.worldId = w.id;
+      node.title = w.title;
+      setWorlds((m) => new Map(m ?? []).set(w.id, { id: w.id, title: w.title, createdAt: w.createdAt, updatedAt: w.updatedAt, coverUrl: null, sceneName: null, characters: 0, shots: 0, prompts: 0, lastPrompt: null, origin: w.origin }));
     }
     setState((s) => ({ ...s, nodes: [...s.nodes, node] }));
     setSelected(node.id);
@@ -164,7 +172,7 @@ export function CanvasPage() {
             })}
           </svg>
           {state.nodes.map((n) => (
-            <NodeView key={n.id} node={n} selected={selected === n.id} onPointerDown={(e) => onNodePointerDown(e, n)}
+            <NodeView key={n.id} node={n} world={n.worldId ? worlds?.get(n.worldId) ?? (worlds ? null : undefined) : null} selected={selected === n.id} onPointerDown={(e) => onNodePointerDown(e, n)}
               onText={(text) => setState((s) => ({ ...s, nodes: s.nodes.map((k) => (k.id === n.id ? { ...k, text } : k)) }))} />
           ))}
         </div>
@@ -244,10 +252,11 @@ function MenuRow({ icon, title, sub, hot, dot, badge, chevron, onClick }: { icon
 
 const KIND_ICON: Record<NodeKind, IconName> = { image: 'image', video: 'video', '3d': 'box', text: 'text', previs: 'previs', world: 'globe' };
 
-function NodeView({ node: n, selected, onPointerDown, onText }: { node: CanvasNode; selected: boolean; onPointerDown: (e: React.PointerEvent) => void; onText: (t: string) => void }) {
+/** `world`: the World node's project - undefined while loading, null when it is gone. */
+function NodeView({ node: n, world, selected, onPointerDown, onText }: { node: CanvasNode; world: WorldSummary | null | undefined; selected: boolean; onPointerDown: (e: React.PointerEvent) => void; onText: (t: string) => void }) {
   return (
     <div className={`cv-node cv-${n.kind} ${selected ? 'selected' : ''}`} style={{ left: n.x, top: n.y, width: n.w, height: n.h }} onPointerDown={onPointerDown}
-      onDoubleClick={() => { if (n.kind === 'world' && n.stageId) navigate(`/canvas/world/${n.stageId}`); }}>
+      onDoubleClick={() => { if (n.kind === 'world' && world) navigate(worldPath(world.id, n.id)); }}>
       <div className="cv-node-label">
         <Icon name={KIND_ICON[n.kind]} size={14} />
         {n.kind === 'image' ? <Icon name="focus" size={14} /> : <span>{NODE_LABEL[n.kind]}</span>}
@@ -257,35 +266,27 @@ function NodeView({ node: n, selected, onPointerDown, onText }: { node: CanvasNo
       {n.kind === '3d' && <div className="cv-node-empty"><Icon name="box" size={22} /></div>}
       {n.kind === 'text' && <textarea className="cv-node-text" placeholder="Write something…" value={n.text ?? ''} onChange={(e) => onText(e.target.value)} />}
       {n.kind === 'previs' && <div className="cv-node-empty cv-col"><Icon name="previs" size={20} /><span className="cv-mini-btn">Enter Studio</span></div>}
-      {n.kind === 'world' && <WorldCard node={n} />}
+      {n.kind === 'world' && <WorldCard node={n} world={world} />}
     </div>
   );
 }
 
-/** The real node: a World (a Viggle stage), its scene as cover, and the way into the 3D Studio. */
-function WorldCard({ node }: { node: CanvasNode }) {
-  const [doc, setDoc] = useState<StageDoc | null>(null);
-  const [missing, setMissing] = useState(false);
-  useEffect(() => {
-    if (!node.stageId) return;
-    let live = true;
-    const load = () => api.getStage(node.stageId!).then((d) => live && setDoc(d)).catch(() => live && setMissing(true));
-    void load();
-    // Coming back from the studio: show what changed.
-    addEventListener('focus', load);
-    return () => { live = false; removeEventListener('focus', load); };
-  }, [node.stageId]);
-  const enter = () => node.stageId && navigate(`/canvas/world/${node.stageId}`);
-  const cover = doc?.scene?.panoramaUrl;
+/** The real node: a World project - its cover, what is in it, and the way into the 3D Studio. */
+function WorldCard({ node, world }: { node: CanvasNode; world: WorldSummary | null | undefined }) {
+  const enter = () => world && navigate(worldPath(world.id, node.id));
+  const empty = world && !world.sceneName && !world.characters && !world.prompts;
   return (
     <div className="cv-world-card">
-      {cover ? <img src={cover} alt="" draggable={false} /> : <div className="cv-world-empty"><Icon name="globe" size={30} /></div>}
+      {world?.coverUrl ? <img src={world.coverUrl} alt="" draggable={false} /> : <div className="cv-world-empty"><Icon name="globe" size={30} /></div>}
       <div className="cv-world-shade" />
       <div className="cv-world-info">
-        <strong>{missing ? 'World not found' : doc?.title ?? node.title ?? 'World'}</strong>
-        {doc && <small>{doc.scene ? doc.scene.name : 'No scene yet'} · {doc.characters.length} characters · {doc.shots.length} shots</small>}
+        <strong>{world === null ? 'World 已删除' : world?.title ?? node.title ?? 'World'}</strong>
+        {world && (empty
+          ? <small>新的 World · 进入后告诉 Agent 你想拍什么</small>
+          : <small>{world.sceneName ?? '还没有场景'} · {world.characters} 个角色 · {world.shots} 个镜头</small>)}
+        {world?.lastPrompt && <small className="cv-world-prompt">“{world.lastPrompt}”</small>}
       </div>
-      <button className="cv-enter" disabled={!node.stageId || missing} onClick={enter}>Enter World <Icon name="arrowRight" size={14} /></button>
+      <button className="cv-enter" disabled={!world} onClick={enter}>{empty ? '开始搭建' : 'Enter World'} <Icon name="arrowRight" size={14} /></button>
     </div>
   );
 }

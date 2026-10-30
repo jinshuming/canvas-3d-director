@@ -1,18 +1,20 @@
 import { randomUUID } from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
-import { copyFile, mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
+import { copyFile, cp, mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { extname, join, normalize } from 'node:path';
 import type { Plugin } from 'vite';
 
 import type { StageDoc } from '../../src/stage/types.ts';
 import { AGENT_INSTRUCTIONS } from '../shared/agentPrompt.ts';
-import { blankStage } from '../shared/blank.ts';
 import type { GenJob, Library, LibraryCharacter, LibraryMotion, LibraryScene } from '../shared/library.ts';
+import type { WorldChat, WorldFile } from '../shared/world.ts';
+import { copyWorld, newWorld, readWorld, storableChat, summarize, WORLD_ID, worldFromStage } from '../shared/world.ts';
 
 /**
- * The Director's server, as Vite middleware: stages (versioned JSON files),
- * the asset library, and Viggle generation jobs.
+ * The Director's server, as Vite middleware: World project files (one
+ * folder each, see shared/world.ts), the asset library, Viggle generation
+ * jobs, and the relay for the agent's model.
  *
  * THE KEY STAYS HERE. Jobs are submitted and polled server-side; the files
  * they produce are downloaded into `dataDir/files` straight away, because
@@ -36,7 +38,9 @@ const MIME: Record<string, string> = {
 
 export function directorServer(opts: DirectorServerOptions): Plugin {
   const base = opts.apiBase ?? 'https://apis.viggle.ai';
-  const stagesDir = join(opts.dataDir, 'stages');
+  const worldsDir = join(opts.dataDir, 'worlds');
+  const trashDir = join(opts.dataDir, 'trash');
+  const legacyStagesDir = join(opts.dataDir, 'stages');
   const filesDir = join(opts.dataDir, 'files');
   const libraryFile = join(opts.dataDir, 'library.json');
   let library: Library = { scenes: [], characters: [], motions: [], jobs: [] };
@@ -48,8 +52,9 @@ export function directorServer(opts: DirectorServerOptions): Plugin {
   };
 
   async function init() {
-    await mkdir(stagesDir, { recursive: true });
+    await mkdir(worldsDir, { recursive: true });
     await mkdir(filesDir, { recursive: true });
+    await migrateStages();
     if (existsSync(libraryFile)) library = JSON.parse(await readFile(libraryFile, 'utf8')) as Library;
     for (const seed of opts.seedScenes ?? []) {
       if (!existsSync(seed.spz) || library.scenes.some((s) => s.name === seed.name)) continue;
@@ -204,16 +209,53 @@ export function directorServer(opts: DirectorServerOptions): Plugin {
   }, POLL_MS);
   timer.unref?.();
 
-  // ── Stages ────────────────────────────────────────────────────────────────
+  // ── Worlds ────────────────────────────────────────────────────────────────
 
-  const stagePath = (id: string) => {
-    if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw httpError(400, 'Bad stage id.');
-    return join(stagesDir, `${id}.json`);
+  const worldDir = (id: string) => {
+    if (!WORLD_ID.test(id)) throw httpError(400, 'Bad world id.');
+    return join(worldsDir, id);
   };
-  async function readStage(id: string): Promise<StageDoc> {
-    const path = stagePath(id);
-    if (!existsSync(path)) throw httpError(404, 'Stage not found.');
-    return JSON.parse(await readFile(path, 'utf8')) as StageDoc;
+  const worldFile = (id: string) => join(worldDir(id), 'world.json');
+  const coverUrl = (w: WorldFile) => (w.cover ? `/api/worlds/${w.id}/cover?v=${encodeURIComponent(w.cover.updatedAt)}` : null);
+  const newWorldId = () => `wld_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
+
+  async function readWorldFile(id: string): Promise<WorldFile> {
+    const path = worldFile(id);
+    if (!existsSync(path)) throw httpError(404, 'World not found.');
+    return readWorld(JSON.parse(await readFile(path, 'utf8')));
+  }
+  async function writeWorld(w: WorldFile): Promise<void> {
+    await mkdir(worldDir(w.id), { recursive: true });
+    await atomicWrite(worldFile(w.id), JSON.stringify(w, null, 2));
+  }
+
+  // One write at a time per world: the stage, the chat and the title land in the same file.
+  const locks = new Map<string, Promise<unknown>>();
+  function mutate<T>(id: string, fn: (w: WorldFile) => Promise<{ world: WorldFile | null; result: T }> | { world: WorldFile | null; result: T }): Promise<T> {
+    const run = (locks.get(id) ?? Promise.resolve()).catch(() => {}).then(async () => {
+      const { world, result } = await fn(await readWorldFile(id));
+      if (world) await writeWorld({ ...world, updatedAt: new Date().toISOString() });
+      return result;
+    });
+    locks.set(id, run);
+    return run;
+  }
+
+  /** Stage files from before worlds existed become worlds (same id); the old folder is kept, renamed. */
+  async function migrateStages() {
+    if (!existsSync(legacyStagesDir)) return;
+    for (const f of (await readdir(legacyStagesDir)).filter((x) => x.endsWith('.json'))) {
+      const stage = JSON.parse(await readFile(join(legacyStagesDir, f), 'utf8')) as StageDoc;
+      if (!WORLD_ID.test(stage.id) || existsSync(worldFile(stage.id))) continue;
+      await writeWorld(worldFromStage(stage));
+    }
+    await rename(legacyStagesDir, `${legacyStagesDir}-migrated-${Date.now()}`);
+  }
+
+  async function listWorlds() {
+    const ids = existsSync(worldsDir) ? (await readdir(worldsDir)).filter((d) => WORLD_ID.test(d) && existsSync(worldFile(d))) : [];
+    const worlds = await Promise.all(ids.map((id) => readWorldFile(id).catch(() => null)));
+    return worlds.filter((w): w is WorldFile => !!w).map((w) => summarize(w, coverUrl)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
   // ── Routing ───────────────────────────────────────────────────────────────
@@ -275,30 +317,91 @@ export function directorServer(opts: DirectorServerOptions): Plugin {
       return true;
     }
 
-    if (p === '/api/stages' && m === 'GET') {
-      const files = (await readdir(stagesDir)).filter((f) => f.endsWith('.json'));
-      const list = await Promise.all(files.map(async (f) => {
-        const d = JSON.parse(await readFile(join(stagesDir, f), 'utf8')) as StageDoc;
-        return { id: d.id, title: d.title, updatedAt: d.updatedAt };
-      }));
-      return json(res, list.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)));
+    if (p === '/api/worlds' && m === 'GET') return json(res, await listWorlds());
+    if (p === '/api/worlds' && m === 'POST') {
+      const body = await readJson(req) as { title?: string; copyOf?: string };
+      const id = newWorldId();
+      let w: WorldFile;
+      if (body.copyOf) {
+        const src = await readWorldFile(body.copyOf);
+        w = copyWorld(src, id, body.title || undefined);
+        if (src.cover && existsSync(join(worldDir(src.id), src.cover.file))) {
+          await mkdir(worldDir(id), { recursive: true });
+          await cp(join(worldDir(src.id), src.cover.file), join(worldDir(id), src.cover.file));
+          w.cover = { ...src.cover };
+        }
+      } else {
+        w = newWorld(id, body.title?.trim() || '未命名 World');
+      }
+      await writeWorld(w);
+      return json(res, w);
     }
-    if (p === '/api/stages' && m === 'POST') {
-      const body = await readJson(req) as { title?: string };
-      const doc = blankStage(`stg_${randomUUID().replace(/-/g, '').slice(0, 16)}`, body.title || 'Untitled stage');
-      await atomicWrite(stagePath(doc.id), JSON.stringify(doc, null, 2));
-      return json(res, doc);
-    }
-    const stage = /^\/api\/stages\/([^/]+)$/.exec(p);
-    if (stage && m === 'GET') return json(res, await readStage(stage[1]!));
-    if (stage && m === 'PUT') {
-      const { baseVersion, doc } = await readJson(req) as { baseVersion: number; doc: StageDoc };
-      const current = await readStage(stage[1]!);
-      // Optimistic lock: a write made from an older version is refused, with the newer one to merge onto.
-      if (current.version !== baseVersion) return json(res, { error: { code: 'VERSION_CONFLICT', message: 'The stage changed elsewhere.' }, doc: current }, 409);
-      const next: StageDoc = { ...doc, id: current.id, version: current.version + 1, updatedAt: new Date().toISOString() };
-      await atomicWrite(stagePath(next.id), JSON.stringify(next, null, 2));
-      return json(res, next);
+
+    const world = /^\/api\/worlds\/([^/]+)(?:\/(stage|chat|cover))?$/.exec(p);
+    if (world) {
+      const [, id, part] = world as unknown as [string, string, string | undefined];
+      if (!part && m === 'GET') return json(res, await readWorldFile(id));
+      if (!part && m === 'PATCH') {
+        const { title } = await readJson(req) as { title?: string };
+        const t = String(title ?? '').trim().slice(0, 80);
+        if (!t) throw httpError(400, 'A world needs a title.');
+        return json(res, await mutate(id, (w) => {
+          const next = { ...w, title: t, stage: { ...w.stage, title: t } };
+          return { world: next, result: summarize(next, coverUrl) };
+        }));
+      }
+      if (!part && m === 'DELETE') {
+        // Recoverable: the folder moves to the trash.
+        await (locks.get(id) ?? Promise.resolve()).catch(() => {});
+        if (!existsSync(worldFile(id))) throw httpError(404, 'World not found.');
+        await mkdir(trashDir, { recursive: true });
+        await rename(worldDir(id), join(trashDir, `${id}-${Date.now()}`));
+        locks.delete(id);
+        return json(res, { ok: true });
+      }
+      if (part === 'stage' && m === 'GET') return json(res, (await readWorldFile(id)).stage);
+      if (part === 'stage' && m === 'PUT') {
+        const { baseVersion, doc } = await readJson(req) as { baseVersion: number; doc: StageDoc };
+        const out = await mutate<{ conflict: StageDoc } | { stage: StageDoc }>(id, (w) => {
+          // Optimistic lock: a write made from an older version is refused, with the newer one to merge onto.
+          if (w.stage.version !== baseVersion) return { world: null, result: { conflict: w.stage } };
+          const stage: StageDoc = { ...doc, id, version: w.stage.version + 1, updatedAt: new Date().toISOString() };
+          // The title is edited on the stage in the editor; the world follows it.
+          return { world: { ...w, stage, title: stage.title.trim() || w.title }, result: { stage } };
+        });
+        if ('conflict' in out) return json(res, { error: { code: 'VERSION_CONFLICT', message: 'The world changed elsewhere.' }, doc: out.conflict }, 409);
+        return json(res, out.stage);
+      }
+      if (part === 'chat' && m === 'PUT') {
+        const { chat } = await readJson(req) as { chat: WorldChat };
+        if (!chat || !Array.isArray(chat.items)) throw httpError(400, 'Bad chat.');
+        return json(res, await mutate(id, (w) => {
+          const next = storableChat({ previousResponseId: chat.previousResponseId ?? null, items: chat.items, updatedAt: new Date().toISOString() });
+          return { world: { ...w, chat: next }, result: { updatedAt: next.updatedAt } };
+        }));
+      }
+      if (part === 'cover' && m === 'PUT') {
+        const { dataUrl } = await readJson(req) as { dataUrl?: string };
+        const b64 = /^data:image\/jpeg;base64,(.+)$/.exec(dataUrl ?? '')?.[1];
+        if (!b64) throw httpError(400, 'Send the cover as a JPEG data URL.');
+        const bytes = Buffer.from(b64, 'base64');
+        if (bytes.length > 2 * 1024 * 1024) throw httpError(413, 'Cover too large.');
+        return json(res, await mutate(id, async (w) => {
+          await atomicWrite(join(worldDir(id), 'cover.jpg'), bytes);
+          const next = { ...w, cover: { file: 'cover.jpg', updatedAt: new Date().toISOString() } };
+          return { world: next, result: { coverUrl: coverUrl(next) } };
+        }));
+      }
+      if (part === 'cover' && m === 'GET') {
+        const w = await readWorldFile(id);
+        const file = w.cover ? join(worldDir(id), w.cover.file) : null;
+        if (!file || !existsSync(file)) throw httpError(404, 'No cover yet.');
+        const s = await stat(file);
+        res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': s.size, 'Cache-Control': 'public, max-age=31536000, immutable' });
+        createReadStream(file).pipe(res);
+        return true;
+      }
+      throw httpError(405, 'Not allowed.');
     }
 
     if (p === '/api/library' && m === 'GET') return json(res, library);
@@ -319,6 +422,8 @@ export function directorServer(opts: DirectorServerOptions): Plugin {
       await init();
       server.middlewares.use((req, res, next) => {
         route(req, res).then((handled) => { if (!handled) next(); }).catch((e: unknown) => {
+          // Failed mid-response (a model stream cut off): the status has gone, so just end it.
+          if (res.headersSent) { res.end(); return; }
           const status = (e as { status?: number }).status ?? 500;
           json(res, { error: { code: (e as { code?: string }).code ?? 'ERROR', message: message(e) } }, status);
         });
@@ -346,7 +451,7 @@ async function readJson(req: IncomingMessage): Promise<unknown> {
   return text ? JSON.parse(text) : {};
 }
 
-async function atomicWrite(path: string, text: string): Promise<void> {
+async function atomicWrite(path: string, text: string | Buffer): Promise<void> {
   const tmp = `${path}.${process.pid}.tmp`;
   await writeFile(tmp, text);
   await rename(tmp, path);
