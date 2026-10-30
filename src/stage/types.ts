@@ -114,6 +114,18 @@ export interface StageShot {
   easing: Easing;
 }
 
+/**
+ * One stretch of the edit: from `start` to `end` (stage seconds) the film
+ * looks through `shotId`. Every shot films the same performance on the same
+ * clock, so a cut picks a camera; it does not retime anything.
+ */
+export interface StageCut {
+  id: string;
+  shotId: string;
+  start: number;
+  end: number;
+}
+
 export type StageAspect = '16:9' | '9:16' | '1:1' | '4:3' | '2.39:1';
 
 export interface StageDoc {
@@ -128,6 +140,8 @@ export interface StageDoc {
   scene: StageScene | null;
   characters: StageCharacter[];
   shots: StageShot[];
+  /** The edit: which shot the film shows when, sorted, without overlaps. Absent or empty: no edit yet. */
+  cuts?: StageCut[];
   updatedAt: string;
 }
 

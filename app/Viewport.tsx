@@ -84,7 +84,7 @@ export function Viewport({ doc, time, view, selection, activeShot, update, onSel
 
   const onPointerDownCapture = (e: React.PointerEvent) => {
     press.current = { x: e.clientX, y: e.clientY };
-    if (!renderer || e.button !== 0 || view.kind === 'shot') return;
+    if (!renderer || e.button !== 0 || view.kind === 'shot' || view.kind === 'edit') return;
     const { x, y } = local(e);
     const id = renderer.pickCharacter(x, y);
     if (!id) return;
@@ -133,7 +133,7 @@ export function Viewport({ doc, time, view, selection, activeShot, update, onSel
     if (p && Math.hypot(e.clientX - p.x, e.clientY - p.y) < 3 && view.kind === 'free') onSelect(null);
   };
 
-  const frame = view.kind === 'shot' ? ASPECTS[doc.aspect] : null;
+  const frame = view.kind === 'shot' || view.kind === 'edit' ? ASPECTS[doc.aspect] : null;
   const loading = assets && (assets.sceneLoading || assets.loadingCharacters.length > 0 || assets.loadingClips.length > 0);
 
   return (
@@ -154,7 +154,7 @@ export function Viewport({ doc, time, view, selection, activeShot, update, onSel
         {assets?.errors.slice(-2).map((e, i) => <span key={i} className="chip error">{e}</span>)}
       </div>
       <div className="viewport-hint">
-        {view.kind === 'free' ? '拖动转视角 · WASD/QE 移动 · 滚轮推拉 · 拖角色移动 · Shift+拖角色旋转' : '镜头视角（只读）· 切回自由相机可编辑'}
+        {view.kind === 'free' ? '拖动转视角 · WASD/QE 移动 · 滚轮推拉 · 拖角色移动 · Shift+拖角色旋转' : view.kind === 'edit' ? '剪辑视角（只读）· 按剪辑轨切换镜头' : '镜头视角（只读）· 切回自由相机可编辑'}
       </div>
     </div>
   );

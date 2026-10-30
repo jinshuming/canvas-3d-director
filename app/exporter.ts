@@ -1,7 +1,7 @@
 import { ArrayBufferTarget, Muxer } from 'mp4-muxer';
 
 import type { StageDoc, StageRenderer, StageView } from '@stage';
-import { ASPECTS, shotSpan } from '@stage';
+import { ASPECTS, editSpan, shotSpan } from '@stage';
 
 export interface ExportProgress {
   frame: number;
@@ -17,7 +17,7 @@ function exportWidth(aspect: number): number {
 
 /** Look through `shotId` at time `t` and save the frame as a PNG. */
 export async function exportFrame(r: StageRenderer, doc: StageDoc, shotId: string, t: number): Promise<Blob> {
-  return withShot(r, shotId, async () => {
+  return withView(r, { kind: 'shot', shotId }, async () => {
     r.setTime(t);
     const aspect = ASPECTS[doc.aspect];
     const canvas = await r.capture(aspect, exportWidth(aspect) * 1.5);
@@ -25,21 +25,34 @@ export async function exportFrame(r: StageRenderer, doc: StageDoc, shotId: strin
   });
 }
 
-/**
- * Render a shot frame by frame - the clock steps exactly 1/fps, so the
- * video is the same however slow the machine - and encode it to H.264 MP4
- * with WebCodecs.
- */
-export async function exportShotVideo(
-  r: StageRenderer,
-  doc: StageDoc,
-  shotId: string,
-  onProgress: (p: ExportProgress) => void,
-  signal: AbortSignal,
-): Promise<Blob> {
+/** Render one shot over its keys' span. */
+export async function exportShotVideo(r: StageRenderer, doc: StageDoc, shotId: string, onProgress: (p: ExportProgress) => void, signal: AbortSignal): Promise<Blob> {
   const shot = doc.shots.find((s) => s.id === shotId);
   const span = shot ? shotSpan(shot) : null;
   if (!shot || !span || span[1] <= span[0]) throw new Error('这个镜头至少需要两个不同时间的关键帧。');
+  return exportVideo(r, doc, { kind: 'shot', shotId }, span, onProgress, signal);
+}
+
+/** Render the edit: the film, each stretch through the shot cut in there. */
+export async function exportEditVideo(r: StageRenderer, doc: StageDoc, onProgress: (p: ExportProgress) => void, signal: AbortSignal): Promise<Blob> {
+  const span = editSpan(doc);
+  if (!span || span[1] <= span[0]) throw new Error('还没有剪辑：先在时间轴的「剪辑」轨上切入镜头。');
+  return exportVideo(r, doc, { kind: 'edit' }, span, onProgress, signal);
+}
+
+/**
+ * Render a view frame by frame - the clock steps exactly 1/fps, so the video
+ * is the same however slow the machine - and encode it to H.264 MP4 with
+ * WebCodecs.
+ */
+async function exportVideo(
+  r: StageRenderer,
+  doc: StageDoc,
+  view: StageView,
+  span: [number, number],
+  onProgress: (p: ExportProgress) => void,
+  signal: AbortSignal,
+): Promise<Blob> {
   if (typeof VideoEncoder === 'undefined') throw new Error('这个浏览器不支持 WebCodecs 视频编码，请用新版 Chrome / Edge。');
 
   const aspect = ASPECTS[doc.aspect];
@@ -58,7 +71,7 @@ export async function exportShotVideo(
   encoder.configure(config);
 
   const target = document.createElement('canvas');
-  return withShot(r, shotId, async () => {
+  return withView(r, view, async () => {
     r.setOverlaysVisible(false);
     try {
       for (let i = 0; i < frames; i++) {
@@ -96,11 +109,11 @@ async function pickConfig(width: number, height: number, fps: number): Promise<V
   throw new Error('这个浏览器不支持 H.264 编码。');
 }
 
-/** Run `fn` looking through a shot, then put the view back. */
-async function withShot<T>(r: StageRenderer, shotId: string, fn: () => Promise<T>): Promise<T> {
+/** Run `fn` looking through `view`, then put the view and the clock back. */
+async function withView<T>(r: StageRenderer, view: StageView, fn: () => Promise<T>): Promise<T> {
   const before: StageView = r.getView();
   const time = r.getTime();
-  r.setView({ kind: 'shot', shotId });
+  r.setView(view);
   try {
     return await fn();
   } finally {

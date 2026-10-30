@@ -1,6 +1,7 @@
 import type { CameraSample } from '../camera.js';
 import { sampleShot, shotSpan, sortedKeys } from '../camera.js';
 import { nextFreeStart } from '../clips.js';
+import { editSpan, setSequence, sortedCuts } from '../cuts.js';
 import { addClip, addMove, addShot, clamp, patchCharacter, patchShot, removeCharacter, removeClip, removeShot, uid } from '../edit.js';
 import type { CameraMoveKind, PairFraming, ShotAngle, ShotSide, ShotSize } from '../framing.js';
 import { ANGLES, cameraMoveKeys, framePair, frameSubject, SHOT_SIZES, SIDES } from '../framing.js';
@@ -172,6 +173,7 @@ function describe(doc: StageDoc, host: StageToolHost, t?: number) {
       id: s.id, name: s.name, interpolation: s.interpolation, easing: s.easing, span: shotSpan(s),
       keys: sortedKeys(s.keys).map((k) => ({ id: k.id, t: k.t, position: v3(k.position), target: v3(k.target), fov: Math.round(k.fov) })),
     })),
+    edit: sortedCuts(doc).map((c) => ({ shot: c.shotId, shot_name: doc.shots.find((s) => s.id === c.shotId)?.name, start: c.start, end: c.end })),
   };
 }
 
@@ -762,14 +764,49 @@ export const STAGE_TOOLS: StageTool[] = [
     },
   },
 
+  {
+    name: 'set_edit',
+    effect: 'edit',
+    description: 'Cut the shots together into one film: a running order of `{shot_id, start}` - each shot plays from its start until the next one starts, the last until `end` (default the timeline\'s end). Every shot films the same performance on the same clock, so a cut only picks the camera. Cut on action or on a line of dialogue: e.g. two-shot to establish, then over-the-shoulder on whoever speaks, the reverse when the other answers. `clear: true` removes the edit. Then `preview` with `edit: true`.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        cuts: { type: 'array', items: { type: 'object', properties: { shot_id: { type: 'string' }, start: NUM }, required: ['shot_id', 'start'] } },
+        end: NUM,
+        clear: { type: 'boolean' },
+      },
+    },
+    async run(i, host) {
+      if (i.clear) { host.update((d) => ({ ...d, cuts: [] })); return ok({ edit: [] }); }
+      const doc = host.getDoc();
+      const order = ((i.cuts ?? []) as Array<{ shot_id: string; start: number }>).map((c) => ({ shotId: findShot(doc, c.shot_id).id, start: Math.max(0, Number(c.start) || 0) }));
+      if (!order.length) throw new ToolError('Give at least one cut, or clear: true.');
+      const end = typeof i.end === 'number' ? i.end : doc.duration;
+      host.update((d) => setSequence(extend(d, end), order, end));
+      const next = host.getDoc();
+      const cuts = sortedCuts(next);
+      const unkeyed = cuts.filter((c) => !next.shots.find((s) => s.id === c.shotId)?.keys.length).map((c) => c.shotId);
+      return ok({
+        edit: cuts.map((c) => ({ shot: c.shotId, start: c.start, end: c.end })),
+        span: editSpan(next),
+        ...(unkeyed.length ? { warning: `These shots have no camera keys yet, so their stretch shows nothing: ${[...new Set(unkeyed)].join(', ')}.` } : {}),
+      });
+    },
+  },
+
   // ── Editor ──
   {
     name: 'preview',
     effect: 'ui',
-    description: 'Show the user: point the viewport through a shot (or the free camera with shot_id null), move the playhead to `time`, and optionally `play`.',
-    input_schema: { type: 'object', properties: { shot_id: { type: ['string', 'null'] }, time: NUM, play: { type: 'boolean' } } },
+    description: 'Show the user: point the viewport through a shot, through the edit (`edit: true`, the film as cut), or the free camera (shot_id null); move the playhead to `time`, and optionally `play`.',
+    input_schema: { type: 'object', properties: { shot_id: { type: ['string', 'null'] }, edit: { type: 'boolean' }, time: NUM, play: { type: 'boolean' } } },
     async run(i, host) {
       if (!host.ui?.preview) return fail('No editor to preview in.');
+      if (i.edit) {
+        if (!sortedCuts(host.getDoc()).length) return fail('There is no edit yet: set_edit first.');
+        host.ui.preview({ edit: true, time: i.time, play: i.play });
+        return ok('Showing the edit to the user.');
+      }
       if (i.shot_id) findShot(host.getDoc(), i.shot_id);
       host.ui.preview({ shotId: i.shot_id ?? null, time: i.time, play: i.play });
       return ok('Showing it to the user.');
@@ -789,9 +826,14 @@ export const STAGE_TOOLS: StageTool[] = [
   {
     name: 'export_shot',
     effect: 'ui',
-    description: 'Render a shot for the user: "mp4" (the whole move, frame by frame) or "png" (one frame at `time`). Downloads in the editor.',
-    input_schema: { type: 'object', properties: { shot_id: { type: 'string' }, format: { type: 'string', enum: ['mp4', 'png'] }, time: NUM }, required: ['shot_id', 'format'] },
+    description: 'Render for the user: a shot as "mp4" (the whole move, frame by frame) or "png" (one frame at `time`), or with `edit: true` the whole edit as mp4. Downloads in the editor. Only when the user asks for a file.',
+    input_schema: { type: 'object', properties: { shot_id: { type: 'string' }, edit: { type: 'boolean' }, format: { type: 'string', enum: ['mp4', 'png'] }, time: NUM }, required: ['format'] },
     async run(i, host) {
+      if (i.edit) {
+        if (!host.ui?.exportEdit) return fail('Export is not available here.');
+        if (!sortedCuts(host.getDoc()).length) return fail('There is no edit yet: set_edit first.');
+        return ok(await host.ui.exportEdit());
+      }
       if (!host.ui?.exportShot) return fail('Export is not available here.');
       const shot = findShot(host.getDoc(), i.shot_id);
       return ok(await host.ui.exportShot(shot.id, i.format, i.time));

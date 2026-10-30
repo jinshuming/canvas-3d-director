@@ -43,7 +43,8 @@ export function patchShot(d: StageDoc, shotId: string, patch: Partial<StageShot>
 }
 
 export function removeShot(d: StageDoc, shotId: string): StageDoc {
-  return { ...d, shots: d.shots.filter((s) => s.id !== shotId) };
+  // Its stretches of the edit go with it.
+  return { ...d, shots: d.shots.filter((s) => s.id !== shotId), ...(d.cuts ? { cuts: d.cuts.filter((c) => c.shotId !== shotId) } : {}) };
 }
 
 /** Add a key, or replace the one already at (nearly) the same time. */

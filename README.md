@@ -22,6 +22,10 @@ npm run dev                  # http://localhost:5193/canvas
 | `/canvas/world` | 所有 World 工程：搜索、打开、复制、删除（移到回收站） |
 | `/canvas/world/<id>?node=<节点>` | 3D 导演台，右侧是 Agent 对话面板。左上角「历史」按钮可以把以前的 World 加载到当前节点 |
 
+编辑器里的镜头和剪辑：
+- **剪辑轨**：时间轴最上面一行，决定成片在每段时间看哪个镜头。按 ＋ 在播放头切到当前镜头；拖动片段右边缘调整切点；「剪辑」视角按剪辑轨播放，「导出成片」把整条剪辑导出成一个 MP4。Agent 拍了多个镜头后会自己剪（`set_edit`）。
+- **镜头卡片**：选中镜头后，在属性卡片里用按钮取景（单人 / 过肩 / 双人、景别、机位高度、方位），上方显示这个镜头在播放头时刻的白模预览。
+
 新的 World 打开后默认由 Agent 主导：素材库先收起，输入框自动获得焦点，点一下示例卡片就能让 Agent 从零搭出一场戏，Agent 还会给 World 起名。每个 World 是一个工程文件，保存片场、对话和封面，格式见 `docs/WORLD_FORMAT.md`。
 
 ## 结构
@@ -29,7 +33,7 @@ npm run dev                  # http://localhost:5193/canvas
 | 位置 | 内容 |
 |---|---|
 | `src/stage/` | 片场核心（别名 `@stage`）：<br>- Stage 文档类型，相机关键帧插值，动作片段和走位的时间计算<br>- 景别、角度、方位，以及过肩、双人构图<br>- `StageRenderer`：多角色、由时间轴驱动、拾取、截图、地面和视线检测 |
-| `src/stage/tools/` | Agent 工具，共 27 个，分观察、素材、角色、动作、走位、镜头、编辑器几类。说明见 `docs/AGENT_TOOLS.md` |
+| `src/stage/tools/` | Agent 工具，共 28 个，分观察、素材、角色、动作、走位、镜头、编辑器几类。说明见 `docs/AGENT_TOOLS.md` |
 | `src/engine/probes.ts` | 在 `@viggle/splat-engine` 之上补两个探针：动作片段的根运动位移、身体初始朝向 |
 | `src/walk/` | 场景摆放（地面放在 y=0、单位为米）和地面索引 |
 | `app/` | 界面：画布、导演台、时间轴、属性卡片、素材库、Agent 面板 |
