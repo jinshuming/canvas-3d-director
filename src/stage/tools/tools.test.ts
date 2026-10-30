@@ -174,3 +174,20 @@ test('frame_shot and camera_move take a two-person framing', async () => {
   const orbit = json(await runStageTool('camera_move', { shot_id, kind: 'orbit', subject: 'A', with: 'B', framing: 'two_shot', degrees: 60, start: 0, end: 3 }, host));
   assert.ok(orbit.keys >= 3);
 });
+
+test('set_edit cuts shots into a film the agent can read back', async () => {
+  const host = fakeHost();
+  json(await runStageTool('add_character', { asset: 'Frodo', position: [0, -1.5], name: 'A' }, host));
+  const wide = json(await runStageTool('add_shot', { name: 'Wide' }, host)).shot_id;
+  const close = json(await runStageTool('add_shot', { name: 'Close' }, host)).shot_id;
+  json(await runStageTool('frame_shot', { shot_id: wide, subject: 'A', size: 'full' }, host));
+  const r = json(await runStageTool('set_edit', { cuts: [{ shot_id: close, start: 3 }, { shot_id: wide, start: 0 }] }, host));
+  assert.deepEqual(r.edit, [{ shot: wide, start: 0, end: 3 }, { shot: close, start: 3, end: 8 }]);
+  assert.match(r.warning, /no camera keys/, 'a cut to an unframed shot is flagged');
+  const stage = json(await runStageTool('get_stage', {}, host));
+  assert.equal(stage.edit.length, 2);
+  assert.equal(stage.edit[1].shot_name, 'Close');
+  json(await runStageTool('set_edit', { clear: true }, host));
+  assert.deepEqual(host.doc.cuts, []);
+  assert.ok((await runStageTool('set_edit', { cuts: [{ shot_id: 'nope', start: 0 }] }, host)).is_error);
+});

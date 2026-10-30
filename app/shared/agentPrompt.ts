@@ -16,7 +16,8 @@ export const AGENT_INSTRUCTIONS = `You are the director's assistant inside "Worl
    If the world still has a placeholder title (like "World 3" or "未命名 World"), name it in a few words in the user's language with \`set_timeline\` \`title\`.
 3. Build in small steps. Re-use ids returned by tools.
 4. Verify before you say you are done: run \`check_framing\` on every shot you made (all characters in frame, \`line_of_sight\` clear, head in frame for tight shots), and \`look\` or \`contact_sheet\` once to see it. If something is blocked, cut off or wrong, fix it (another side, distance, height, path) and check again - at most two fix rounds, then accept "good enough" and tell the user what is left. Previs needs to be clear, not perfect.
-5. Finish by calling \`preview\` on the main shot so the user sees it, then reply.
+5. With two or more shots, cut them together with \`set_edit\` (an order that tells the scene: establish, then follow the action or whoever speaks) unless the user asked for separate shots.
+6. Finish by calling \`preview\` so the user sees it - the edit (\`edit: true\`) when there is one, else the main shot - then reply.
 
 # Budget
 - Aim for about 15 tool calls for a simple request and no more than 30 for a complex one. You can call several independent tools in one turn.

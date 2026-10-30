@@ -4,7 +4,7 @@ import type { StageDoc } from '@stage';
 
 import { Icon } from './icons.tsx';
 import type { Selection } from './ops.ts';
-import { clamp, patchClip, patchKey } from './ops.ts';
+import { clamp, cutTo, moveCutEnd, patchClip, patchKey, shotColor, sortedCuts } from './ops.ts';
 import type { StageStore } from './useStage.ts';
 
 interface Props {
@@ -25,14 +25,16 @@ const PX_PER_S = 96;
 const SNAP = 1 / 24;
 
 /**
- * The stage's clock: a ruler and playhead, the active shot's camera keys, and
- * a track per character with its motion clips. Drag the playhead to scrub,
- * a clip to move it, its right edge to trim it, a key to retime it.
+ * The stage's clock: a ruler and playhead, the edit (which shot the film
+ * shows when), the active shot's camera keys, and a track per character with
+ * its motion clips. Drag the playhead to scrub, a clip to move it, its right
+ * edge to trim it, a key to retime it, a cut's right edge to move the cut.
  */
 export function Timeline({ doc, time, playing, selection, activeShot, update, onTime, onSelect, onPlay, onSelectKey }: Props) {
   const lanes = useRef<HTMLDivElement>(null);
   const width = doc.duration * PX_PER_S;
   const shot = doc.shots.find((s) => s.id === activeShot) ?? null;
+  const cuts = sortedCuts(doc);
 
   const timeAt = (clientX: number) => {
     const rect = lanes.current!.getBoundingClientRect();
@@ -87,6 +89,34 @@ export function Timeline({ doc, time, playing, selection, activeShot, update, on
           <div className="lane ruler" onPointerDown={scrub}>
             <div className="lane-label">时间</div>
             {ticks.map((s) => <div key={s} className="tick" style={{ left: LABEL_W + s * PX_PER_S }}>{s}s</div>)}
+          </div>
+
+          <div className="lane edit-lane">
+            <div className="lane-label" title="剪辑：成片在每段时间看哪个镜头">
+              <Icon name="film" size={14} />剪辑
+              <button className="lane-add" disabled={!shot} title={shot ? `在播放头切到「${shot.name}」` : '先建一个镜头'}
+                onClick={(e) => { e.stopPropagation(); if (shot) update((d) => cutTo(d, shot.id, snap(time))); }}>
+                <Icon name="plus" size={13} />
+              </button>
+            </div>
+            <div className="lane-body" onPointerDown={scrub} />
+            {!cuts.length && <div className="lane-hint" style={{ left: LABEL_W + 10 }}>按 ＋ 在播放头切到当前镜头，把多个镜头剪成一条成片</div>}
+            {cuts.map((c) => {
+              const i = doc.shots.findIndex((x) => x.id === c.shotId);
+              const on = selection?.kind === 'cut' && selection.cutId === c.id;
+              return (
+                <div key={c.id} className={`cut ${on ? 'on' : ''}`} title={`${doc.shots[i]?.name ?? '?'} · ${c.start.toFixed(2)}–${c.end.toFixed(2)}s`}
+                  style={{ left: LABEL_W + c.start * PX_PER_S, width: Math.max(8, (c.end - c.start) * PX_PER_S), ['--cut' as string]: shotColor(i) }}
+                  onPointerDown={(e) => { e.stopPropagation(); onSelect({ kind: 'cut', cutId: c.id }); onTime(Math.max(time, c.start) < c.end ? Math.max(time, c.start) : c.start); }}>
+                  <span>{doc.shots[i]?.name ?? '已删除的镜头'}</span>
+                  <div className="clip-edge" onPointerDown={(e) => {
+                    onSelect({ kind: 'cut', cutId: c.id });
+                    const end0 = c.end;
+                    dragging(e, (dt) => update((d) => moveCutEnd(d, c.id, snap(end0 + dt)), { commit: false }), commit);
+                  }} />
+                </div>
+              );
+            })}
           </div>
 
           <div className="lane">

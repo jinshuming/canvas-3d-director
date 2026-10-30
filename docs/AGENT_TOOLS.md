@@ -19,7 +19,7 @@
 
 返回格式就是 Messages API 的 `tool_result` 内容：文字加 base64 JPEG。把 `stageToolDefinitions()` 直接作为 `tools` 传给模型，用 `runStageTool(name, input, host)` 执行。
 
-## 工具清单（27 个）
+## 工具清单（28 个）
 
 ### 观察世界（只读）
 | 工具 | 用途 |
@@ -73,6 +73,7 @@
 | `camera_move` | 预设运镜：static 固定、push_in 推、pull_out 拉、orbit 环绕、crane_up / crane_down 升降、pan 摇、track 跟拍（跟随移动中的角色，保持构图）。也收双人构图（orbit 只能配 two_shot） |
 | `set_camera_keys` | 精确控制：自己给关键帧，`target` 可以写坐标，也可以 `look_at` 一个角色 |
 | `edit_shot` | 改名、改关键帧连接方式（平滑 / 线性 / 硬切）、时间缓动，删除关键帧，删除镜头 |
+| `set_edit` | 剪辑：按顺序给出 `{shot_id, start}`，每个镜头一直播到下一个镜头开始，最后一个播到 `end`。所有镜头拍的是同一场表演、共用一条时钟，所以切换只是换机位。`clear: true` 清空剪辑；`preview` / `export_shot` 传 `edit: true` 可以预览、导出整条成片 |
 
 ### 界面
 | 工具 | 用途 |

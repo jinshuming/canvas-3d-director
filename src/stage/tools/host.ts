@@ -19,13 +19,15 @@ export interface StageToolHost {
   assets: AssetSource;
   /** Optional UI hooks: show the agent's work as it goes. */
   ui?: {
-    /** Point the viewport at a shot (or back to the free camera) and move the playhead. */
-    preview?(p: { shotId?: string | null; time?: number; play?: boolean }): void;
+    /** Point the viewport at a shot, the edit (`edit: true`) or back to the free camera, and move the playhead. */
+    preview?(p: { shotId?: string | null; edit?: boolean; time?: number; play?: boolean }): void;
     select?(s: { characterId?: string; shotId?: string } | null): void;
     undo?(): void;
     redo?(): void;
     /** Render a shot to video or a frame to PNG and hand it to the user. */
     exportShot?(shotId: string, kind: 'png' | 'mp4', time?: number): Promise<string>;
+    /** Render the edit (all its cuts, in order) to video and hand it to the user. */
+    exportEdit?(): Promise<string>;
   };
 }
 

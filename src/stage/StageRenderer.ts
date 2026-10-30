@@ -6,12 +6,14 @@ import { buildFloorIndex } from '../walk/floorIndex.js';
 import { isUprightFile, placementFromGround, placeWalkScene } from '../walk/placement.js';
 import type { CameraSample } from './camera.js';
 import { sampleShot, shotPath, sortedKeys } from './camera.js';
+import { editCamera } from './cuts.js';
 import { sampleTrack, trackTravel } from './clips.js';
 import { sampleMoves } from './moves.js';
 import type { StageCharacter, StageDoc, StagePlacement, StageShot, Vec3Tuple } from './types.js';
 
 /** What the viewport shows: the free editing camera, a shot's camera, or a fixed camera (an agent looking somewhere). */
-export type StageView = { kind: 'free' } | { kind: 'shot'; shotId: string } | { kind: 'camera'; camera: CameraSample };
+/** What the viewport looks through: the free camera, one shot, the edit (whichever shot is cut in at the time), or a fixed camera. */
+export type StageView = { kind: 'free' } | { kind: 'shot'; shotId: string } | { kind: 'edit' } | { kind: 'camera'; camera: CameraSample };
 
 export interface StageRendererEvents {
   /** The scene finished loading; `placement` is what it was mounted with (measured when the doc had none). */
@@ -447,6 +449,9 @@ export class StageRenderer {
       const shot = doc.shots.find((s) => s.id === view.shotId);
       const sample = shot ? sampleShot(shot, this.time) : null;
       if (sample) this.applyCamera(sample);
+    } else if (view.kind === 'edit') {
+      const sample = editCamera(doc, this.time);
+      if (sample) this.applyCamera(sample);
     } else if (view.kind === 'camera') {
       this.applyCamera(view.camera);
     }
@@ -782,7 +787,7 @@ export class StageRenderer {
     }
     // In a shot's own view the path would sit in front of the lens.
     const shot: StageShot | undefined = doc.shots.find((s) => s.id === this.pathShot);
-    if (!shot || this.view.kind === 'shot') return;
+    if (!shot || this.view.kind === 'shot' || this.view.kind === 'edit') return;
     const path = shotPath(shot);
     if (path.length > 1) {
       const seg: number[] = [];

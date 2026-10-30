@@ -1,5 +1,6 @@
 export * from './types.js';
 export { ease, sampleShot, shotPath, shotSpan, sortedKeys } from './camera.js';
+export { cutAt, cutTo, editCamera, editSpan, moveCutEnd, normalizeCuts, patchCut, removeCut, setSequence, sortedCuts } from './cuts.js';
 export type { CameraSample } from './camera.js';
 export { nextFreeStart, overlapping, sampleTrack, trackTravel } from './clips.js';
 export type { ClipSample } from './clips.js';
