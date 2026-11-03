@@ -134,15 +134,20 @@ export function directorServer(opts: DirectorServerOptions): Plugin {
       const form = new FormData();
       form.set('type', 'vsplat');
       form.set('render_thumbnail', 'true');
+      // A description alone makes the character (type=vsplat with enhance_prompt, no image); with an
+      // image it steers how the image is enhanced. 1000 characters at most, and it needs enhance on.
+      const describe = String(input.prompt ?? '').trim();
+      if (describe.length > 1000) throw httpError(400, 'Describe the character in 1000 characters or fewer.');
+      if (describe) form.set('enhance_prompt', describe);
       if (input.name) form.set('name', String(input.name));
       if (typeof input.imageUrl === 'string' && input.imageUrl) form.set('image_url', input.imageUrl);
       else if (typeof input.imageBase64 === 'string') {
         const mime = String(input.mimeType ?? 'image/png');
         form.set('image', new Blob([Buffer.from(input.imageBase64, 'base64')], { type: mime }), `character${mimeExt(mime)}`);
-      } else throw httpError(400, 'Choose an image.');
+      } else if (!describe) throw httpError(400, 'Describe the character, or choose an image.');
       const created = await viggle('/v1/characters', { method: 'POST', body: form });
       remoteId = String(created.id);
-      label = String(input.name || 'Character');
+      label = String(input.name || describe.slice(0, 40) || 'Character');
       credits = 30;
     } else {
       const text = String(input.text ?? '').trim();

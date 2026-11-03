@@ -21,8 +21,28 @@ export interface TurnStats {
   outputTokens: number;
 }
 
+/** What one request may spend, by tool: a runaway guard, whatever the spend mode. */
+const SPEND_CAPS: Record<string, number> = { generate_asset: 4, fill_scene_view: 2 };
+
+/**
+ * Whether the agent asks before it spends credits. `auto` (default): it spends them, within the caps
+ * above, and says what it spent. `ask`: a card asks first (localStorage `director:spend` = `ask`).
+ * `deny`: nothing is spent and the agent is told the user said no (set by the evaluation runner).
+ */
+function spendMode(): 'auto' | 'ask' | 'deny' {
+  const w = (window as unknown as { __spendMode?: string }).__spendMode;
+  if (w === 'ask' || w === 'deny' || w === 'auto') return w;
+  try { return localStorage.getItem('director:spend') === 'ask' ? 'ask' : 'auto'; } catch { return 'auto'; }
+}
+
+function declined(tool: string): ToolResult {
+  return { content: [{ type: 'text', text: tool === 'fill_scene_view'
+    ? 'The user declined to spend credits on this fill. Do not ask again: say what the check found and that they can ask you to fill it.'
+    : 'The user declined to spend credits on this. Use an existing asset instead.' }], is_error: true };
+}
+
 /** Model turns per request. Near the end the agent is told to wrap up; the last turn may not call tools. */
-const MAX_STEPS = 24;
+const MAX_STEPS = 32;
 const WRAP_UP_AT = MAX_STEPS - 5;
 const OPENAI_TOOLS = STAGE_TOOLS.map((t) => ({ type: 'function', name: t.name, description: t.description, parameters: t.input_schema }));
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -119,15 +139,22 @@ export function useAgent(worldId: string, initial: WorldChat, host: StageToolHos
           let result: ToolResult;
           try { args = JSON.parse(call.arguments || '{}') as Record<string, unknown>; } catch { /* the tool reports the bad input */ }
           const tool = STAGE_TOOLS.find((x) => x.name === call.name);
-          const wrong = tool?.effect === 'cost' ? await tool.precheck?.(args, host) : null;
+          // Spending is capped per request whoever approves it: a runaway loop must not be able to run up a bill.
+          const used = stats.tools.filter((n) => n === call.name).length;
+          const cap = SPEND_CAPS[call.name];
+          const wrong = cap !== undefined && used > cap
+            ? `That is more than ${cap} ${call.name === 'generate_asset' ? 'generations' : 'fills'} in one request. Stop: use what the library has, and tell the user what you stood in for.`
+            : tool?.effect === 'cost' ? await tool.precheck?.(args, host) : null;
+          const mode = spendMode();
           if (wrong) {
-            // Refused before the user is asked: a call that cannot work costs them no click.
+            // Refused before anything is spent or asked: a call that cannot work costs nothing.
             result = { content: [{ type: 'text', text: wrong }], is_error: true };
-          } else if (tool?.effect === 'cost' && !(await confirm(costText(call.name, args, host.getDoc())))) {
-            const fill = call.name === 'fill_scene_view';
-            result = { content: [{ type: 'text', text: fill
-              ? 'The user declined to spend credits on this fill. Do not ask again: say what the check found and that they can ask you to fill it.'
-              : 'The user declined to spend credits on this. Use an existing asset instead.' }], is_error: true };
+          } else if (tool?.effect === 'cost' && mode === 'deny') {
+            // For evaluations: the call is made, the money is not spent.
+            (window as unknown as { __spendDenied?: number }).__spendDenied = ((window as unknown as { __spendDenied?: number }).__spendDenied ?? 0) + 1;
+            result = declined(call.name);
+          } else if (tool?.effect === 'cost' && mode === 'ask' && !(await confirm(costText(call.name, args, host.getDoc())))) {
+            result = declined(call.name);
           } else {
             result = await runStageTool(call.name, args, host);
           }

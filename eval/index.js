@@ -36,6 +36,9 @@ async function freshWorld(tag) {
 
 /** One user turn: type it, wait for the agent to finish (declining any spend), read what it did. */
 async function turn(text, { declineCosts = true, timeoutMs = 600_000 } = {}) {
+  // An evaluation never spends credits: the agent's spend calls are made and refused (see useAgent's spendMode).
+  window.__spendMode = declineCosts ? 'deny' : 'ask';
+  const denied0 = window.__spendDenied ?? 0;
   const box = document.querySelector('.ag-panel .cv-composer textarea');
   setTextarea(box, text);
   await sleep(100);
@@ -50,13 +53,13 @@ async function turn(text, { declineCosts = true, timeoutMs = 600_000 } = {}) {
       const buttons = pending.querySelectorAll('.ag-confirm-row button');
       (declineCosts ? buttons[1] : buttons[0]).click();
     }
-    if (performance.now() - t0 > timeoutMs) { document.querySelector('.ag-panel .cv-send').click(); await sleep(500); return { timedOut: true, reply: '', stats: window.__agentLast, confirms, errors: ['timeout'] }; }
+    if (performance.now() - t0 > timeoutMs) { document.querySelector('.ag-panel .cv-send').click(); await sleep(500); return { timedOut: true, reply: '', stats: window.__agentLast, confirms: confirms + ((window.__spendDenied ?? 0) - denied0), errors: ['timeout'] }; }
     await sleep(400);
   }
   await sleep(500);
   const reply = [...document.querySelectorAll('.ag-panel .ag-reply')].pop()?.innerText ?? '';
   const errors = [...document.querySelectorAll('.ag-panel .ag-error')].map((e) => e.innerText);
-  return { reply, errors, confirms, stats: JSON.parse(JSON.stringify(window.__agentLast ?? {})) };
+  return { reply, errors, confirms: confirms + ((window.__spendDenied ?? 0) - denied0), stats: JSON.parse(JSON.stringify(window.__agentLast ?? {})) };
 }
 
 const clamp01 = (v) => Math.max(0, Math.min(1, v));

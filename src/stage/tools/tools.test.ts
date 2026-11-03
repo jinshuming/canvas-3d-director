@@ -303,3 +303,34 @@ test('fill_scene_view refuses what cannot be filled, and a second fill while one
   host.doc.scene!.viggle = null;
   assert.match((await tool.precheck!({ position: [1, 1.4, 0], yaw: 90, pitch: 0 }, host))!, /only a scene generated here/);
 });
+
+test('generate_asset makes a character from a description alone, and refuses one with neither a description nor an image', async () => {
+  const host = fakeHost();
+  const seen: Array<{ kind: string; input: Record<string, unknown> }> = [];
+  (host.assets as unknown as Record<string, unknown>).generate = async (kind: string, input: Record<string, unknown>) => { seen.push({ kind, input }); return { id: 'job_1', kind, status: 'processing', label: 'x', credits: 30, assetId: null, error: null }; };
+  const ok1 = await runStageTool('generate_asset', { kind: 'character', prompt: 'a red-armoured samurai, standing, full body', name: 'Samurai' }, host);
+  assert.notEqual(ok1.is_error, true);
+  assert.deepEqual(seen[0], { kind: 'character', input: { imageUrl: undefined, prompt: 'a red-armoured samurai, standing, full body', name: 'Samurai' } });
+  assert.equal((await runStageTool('generate_asset', { kind: 'character' }, host)).is_error, true, 'neither');
+  assert.equal((await runStageTool('generate_asset', { kind: 'character', prompt: 'x'.repeat(1001) }, host)).is_error, true, 'over 1000 characters');
+  assert.equal(seen.length, 1, 'refused calls reach nothing');
+});
+
+test('generate_asset is prechecked before the user is asked, and wait_for_jobs waits for the jobs to land', async () => {
+  const host = fakeHost();
+  const gen = STAGE_TOOLS.find((t) => t.name === 'generate_asset')!;
+  assert.match((await gen.precheck!({ kind: 'scene', prompt: 'a forest' }, host))!, /not set up/);
+  let polls = 0;
+  const job = (status: string) => ({ id: 'job_1', kind: 'character', status, label: 'samurai', credits: 30, assetId: status === 'ready' ? 'chr_1' : null, error: null });
+  Object.assign(host.assets, { generate: async () => job('processing'), jobs: async () => [job(++polls >= 2 ? 'ready' : 'processing')] });
+  assert.equal(await gen.precheck!({ kind: 'scene', prompt: 'a forest' }, host), null);
+  assert.match((await gen.precheck!({ kind: 'motion' }, host))!, /needs a `prompt`/);
+  assert.match((await gen.precheck!({ kind: 'character' }, host))!, /prompt.*image_url/);
+  const r = json(await runStageTool('wait_for_jobs', { seconds: 20 }, host));
+  assert.equal(r.jobs[0].status, 'ready');
+  assert.equal(r.jobs[0].asset_id, 'chr_1');
+  assert.equal(r.still_processing, undefined);
+  // Nothing in progress: answers at once.
+  Object.assign(host.assets, { jobs: async () => [job('ready')] });
+  assert.equal(json(await runStageTool('wait_for_jobs', {}, host)).waiting, 0);
+});

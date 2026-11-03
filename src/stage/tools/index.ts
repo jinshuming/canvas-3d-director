@@ -11,7 +11,7 @@ import { checkScene, measureFrame } from '../scenecheck.js';
 import { fileToWorldPoint, placeWalkScene, worldToFilePoint } from '../../walk/placement.js';
 import type { CameraKey, Easing, Interpolation, StageAspect, StageCharacter, StageClip, StageDoc, StageMove, StageShot, Vec3Tuple } from '../types.js';
 import { ASPECTS } from '../types.js';
-import type { AssetKind, AssetRef, StageToolHost, ToolResult } from './host.js';
+import type { AssetKind, AssetRef, GenerationJob, StageToolHost, ToolResult } from './host.js';
 import { contactSheet, povCamera, renderStill, settle, toBase64Jpeg, topDownCamera } from './look.js';
 
 export type { AssetKind, AssetRef, AssetSource, GenerationJob, StageToolHost, ToolResult } from './host.js';
@@ -25,7 +25,7 @@ export { contactSheet, povCamera, renderStill, settle, topDownCamera } from './l
  * Each tool is a Messages API tool definition (`name`, `description`,
  * `input_schema`) with an executor. `effect` says what calling it does:
  * `read` changes nothing, `edit` changes the stage (one undo step), `cost`
- * spends credits (confirm with the user first), `ui` acts on the editor.
+ * spends credits (the host decides whether to ask first; the agent loop caps them per request), `ui` acts on the editor.
  */
 export interface StageTool {
   name: string;
@@ -241,6 +241,16 @@ function fillBlock(doc: StageDoc): string | null {
 
 const pct = (v: number) => `${Math.round(v * 1000) / 10}%`;
 
+/** What is wrong with a generate_asset call, or null. */
+function generateProblem(i: Record<string, any>, host: StageToolHost): string | null { // eslint-disable-line @typescript-eslint/no-explicit-any
+  if (!host.assets.generate) return 'Generation is not set up here (no API key on the server).';
+  const kind = i.kind as AssetKind;
+  if (kind === 'character' && !i.prompt && !i.image_url) return 'A character needs `prompt` (a description of them) or `image_url`.';
+  if (kind === 'character' && String(i.prompt ?? '').length > 1000) return 'Describe the character in 1000 characters or fewer.';
+  if ((kind === 'scene' || kind === 'motion') && !String(i.prompt ?? '').trim()) return `A ${kind} needs a \`prompt\`.`;
+  return null;
+}
+
 /** Check a fill_scene_view call and turn it into the pose to shoot from; throws a ToolError saying what to change. */
 async function planFill(i: Record<string, any>, host: StageToolHost): Promise<{ pose: { position: Vec3Tuple; yaw: number; pitch: number } }> { // eslint-disable-line @typescript-eslint/no-explicit-any
       const doc = host.getDoc();
@@ -446,18 +456,49 @@ export const STAGE_TOOLS: StageTool[] = [
   {
     name: 'generate_asset',
     effect: 'cost',
-    description: 'Generate a new asset with Viggle. SPENDS CREDITS (scene 6, character 30, motion 10) - only after the user agreed. scene: `prompt` (a place). character: `image_url` (a full-body photo or drawing). motion: `prompt` (what the body does) and `seconds` (3-60). Returns a job; poll check_jobs, then use the asset id.',
+    description: 'Generate a new asset with Viggle when the library has nothing that matches the intent. SPENDS CREDITS (scene 6, character 30, motion 10), spent at once with no confirmation: be sure nothing in the library matches. Several in one turn run at once; at most 4 per request. scene: `prompt` (a place). character: `prompt` (who they are: a full-body description - age, build, clothes, colours, pose standing) and/or `image_url` (a full-body photo or drawing; the prompt then steers it) - one of the two, 1000 characters at most, a few minutes. motion: `prompt` (what the body does) and `seconds` (3-60). Returns a job; poll check_jobs, then use the asset id.',
     input_schema: {
       type: 'object',
       properties: { kind: { type: 'string', enum: ['scene', 'character', 'motion'] }, prompt: { type: 'string' }, image_url: { type: 'string' }, seconds: NUM, name: { type: 'string' } },
       required: ['kind'],
     },
+    // Asked before the user is, so a call that cannot work costs them no click.
+    async precheck(i, host) { return generateProblem(i, host); },
     async run(i, host) {
+      const problem = generateProblem(i, host);
+      if (problem) return fail(problem);
       if (!host.assets.generate) return fail('Generation is not set up here (no API key on the server).');
       const kind = i.kind as AssetKind;
-      const input = kind === 'scene' ? { prompt: i.prompt } : kind === 'character' ? { imageUrl: i.image_url, name: i.name } : { text: i.prompt, duration: i.seconds ?? 5, name: i.name };
+      const input = kind === 'scene' ? { prompt: i.prompt } : kind === 'character' ? { imageUrl: i.image_url, prompt: i.prompt, name: i.name } : { text: i.prompt, duration: i.seconds ?? 5, name: i.name };
       const job = await host.assets.generate(kind, input);
       return ok({ job_id: job.id, status: job.status, credits: job.credits });
+    },
+  },
+  {
+    name: 'wait_for_jobs',
+    effect: 'read',
+    description: 'Wait for generation jobs (assets, scene fills) to finish, then report them: up to `seconds` (default 45, at most 60) - call it again if some are still processing. Without `job_ids` it waits for every job in progress. A ready job carries the new asset id; use it with set_scene / add_character / the motion name. Prefer this to calling check_jobs over and over: it costs no extra step while you wait.',
+    input_schema: { type: 'object', properties: { job_ids: { type: 'array', items: { type: 'string' } }, seconds: { ...NUM, description: 'Default 45, at most 60.' } } },
+    async run(i, host) {
+      if (!host.assets.jobs) return ok([]);
+      const limit = Date.now() + clamp(typeof i.seconds === 'number' ? i.seconds : 45, 1, 60) * 1000;
+      const want = (all: GenerationJob[]) => (Array.isArray(i.job_ids) && i.job_ids.length ? all.filter((j) => i.job_ids.includes(j.id)) : all.filter((j) => j.status === 'processing'));
+      let all = await host.assets.jobs();
+      const watched = new Set(want(all).map((j) => j.id));
+      if (!watched.size) return ok({ waiting: 0, note: 'No jobs in progress.' });
+      while (Date.now() < limit && all.some((j) => watched.has(j.id) && j.status === 'processing')) {
+        await new Promise((r) => setTimeout(r, 3000));
+        all = await host.assets.jobs();
+      }
+      const jobs = all.filter((j) => watched.has(j.id));
+      const pending = jobs.filter((j) => j.status === 'processing').length;
+      return ok({
+        jobs: jobs.map((j) => ({
+          id: j.id, kind: j.kind, status: j.status, asset_id: j.assetId, error: j.error, label: j.label,
+          ...(j.kind === 'fill' && j.status === 'ready' ? { next: 'set_scene with this asset_id to see the filled scene.' } : {}),
+        })),
+        ...(pending ? { still_processing: pending, note: 'Not finished yet: call wait_for_jobs again.' } : {}),
+      });
     },
   },
   {
@@ -518,7 +559,7 @@ export const STAGE_TOOLS: StageTool[] = [
   {
     name: 'fill_scene_view',
     effect: 'cost',
-    description: 'Repair the scene from one camera pose: Viggle generates a view there and rebuilds the scene from every view it holds (1-3 minutes). SPENDS CREDITS (about 8 for the first fill, one more each time) - the user confirms each one. Give `view_id` from find_scene_gaps (with its @version), or `position` [x, y, z] in stage metres with `yaw` and `pitch` for a defect you saw in a `look`. One pose per call, one fill at a time. The result is a NEW scene asset: when check_jobs says ready, call set_scene with it, then find_scene_gaps again. Only scenes generated here can be filled.',
+    description: 'Repair the scene from one camera pose: Viggle generates a view there and rebuilds the scene from every view it holds (1-3 minutes). SPENDS CREDITS (about 8 for the first fill, one more each time), at once with no confirmation; at most 2 per request. Give `view_id` from find_scene_gaps (with its @version), or `position` [x, y, z] in stage metres with `yaw` and `pitch` for a defect you saw in a `look`. One pose per call, one fill at a time. The result is a NEW scene asset: when check_jobs says ready, call set_scene with it, then find_scene_gaps again. Only scenes generated here can be filled.',
     input_schema: {
       type: 'object',
       properties: {
