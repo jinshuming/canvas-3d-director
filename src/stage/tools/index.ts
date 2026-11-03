@@ -6,6 +6,9 @@ import { addClip, addMove, addShot, clamp, patchCharacter, patchShot, removeChar
 import type { CameraMoveKind, PairFraming, ShotAngle, ShotSide, ShotSize } from '../framing.js';
 import { ANGLES, cameraMoveKeys, framePair, frameSubject, SHOT_SIZES, SIDES } from '../framing.js';
 import { moveLength, sampleMoves, yawToward } from '../moves.js';
+import type { GapView } from '../scenecheck.js';
+import { checkScene, measureFrame } from '../scenecheck.js';
+import { fileToWorldPoint, placeWalkScene, worldToFilePoint } from '../../walk/placement.js';
 import type { CameraKey, Easing, Interpolation, StageAspect, StageCharacter, StageClip, StageDoc, StageMove, StageShot, Vec3Tuple } from '../types.js';
 import { ASPECTS } from '../types.js';
 import type { AssetKind, AssetRef, StageToolHost, ToolResult } from './host.js';
@@ -29,6 +32,11 @@ export interface StageTool {
   description: string;
   input_schema: Record<string, unknown>;
   effect: 'read' | 'edit' | 'cost' | 'ui';
+  /**
+   * For a `cost` tool: what is wrong with this call, or null. Asked BEFORE the user is asked to spend
+   * credits, so a stale id or a scene that cannot be filled never costs them a click.
+   */
+  precheck?(input: Record<string, any>, host: StageToolHost): Promise<string | null>; // eslint-disable-line @typescript-eslint/no-explicit-any
   run(input: Record<string, any>, host: StageToolHost): Promise<ToolResult>; // eslint-disable-line @typescript-eslint/no-explicit-any
 }
 
@@ -95,10 +103,9 @@ function subjectAt(host: StageToolHost, doc: StageDoc, ref: unknown, t: number):
 /** `framing` / `with` from a camera tool's input: a two-person framing, or null for one subject. */
 function pairOf(doc: StageDoc, i: Record<string, unknown>): { kind: PairFraming; a: StageCharacter; b: StageCharacter } | null {
   const kind = i.framing as string | undefined;
-  if (!kind || kind === 'single') {
-    if (i.with !== undefined) throw new ToolError('`with` needs `framing`: "over_shoulder" or "two_shot".');
-    return null;
-  }
+  // The model fills every optional field it sees (`with: ""`, `framing: "single"`): a second character
+  // means nothing for one subject, so it is ignored rather than refused.
+  if (!kind || kind === 'single') return null;
   if (kind !== 'over_shoulder' && kind !== 'two_shot') throw new ToolError(`Unknown framing "${kind}".`);
   if (Array.isArray(i.subject) || i.with === undefined) throw new ToolError(`"${kind}" needs two characters: \`subject\` and \`with\`.`);
   const a = findCharacter(doc, i.subject);
@@ -154,7 +161,23 @@ function replaceKeys(shot: StageShot, keys: CameraKey[], start: number, end: num
   return [...shot.keys.filter((k) => k.t < start - eps || k.t > end + eps), ...keys].sort((a, b) => a.t - b.t);
 }
 
+/**
+ * Reject a framing argument that is not one of the vocabulary, saying which word belongs where. The model
+ * mixes them up ("front" is a side, not an angle); passing one on would put NaN in the camera.
+ */
+function checkFraming(i: Record<string, any>): void { // eslint-disable-line @typescript-eslint/no-explicit-any
+  const tables: Array<[string, Record<string, unknown>, boolean]> = [['size', SHOT_SIZES, false], ['to_size', SHOT_SIZES, false], ['angle', ANGLES, true], ['side', SIDES, true]];
+  for (const [name, table, numeric] of tables) {
+    const v = i[name];
+    if (v === undefined || v === null || (numeric && typeof v === 'number' && Number.isFinite(v))) continue;
+    if (typeof v === 'string' && v in table) continue;
+    const elsewhere = [['size', SHOT_SIZES], ['angle', ANGLES], ['side', SIDES]].find(([n, t]) => n !== name.replace('to_', '') && typeof v === 'string' && v in (t as object));
+    throw new ToolError(`\`${name}\` = ${JSON.stringify(v)} is not valid. Use one of: ${Object.keys(table).join(', ')}${numeric ? ' (or a number of degrees)' : ''}.${elsewhere ? ` "${v}" is a ${elsewhere[0]}, put it in \`${elsewhere[0]}\`.` : ''}`);
+  }
+}
+
 function key(cam: CameraSample, t: number): CameraKey {
+  if (![...cam.position, ...cam.target, cam.fov].every(Number.isFinite)) throw new ToolError('That framing gave an invalid camera (check size, angle, side, fov and offset).');
   return { id: uid('key'), t: r2(t), position: v3(cam.position), target: v3(cam.target), fov: r2(cam.fov) };
 }
 
@@ -197,6 +220,54 @@ const PAIR_PROPS = {
 };
 
 // ── The tools ───────────────────────────────────────────────────────────────
+
+
+// ── Scene check and fill ────────────────────────────────────────────────────
+
+/** The last scene check a host ran, so `fill_scene_view` can take one of its ids. */
+const lastCheck = new WeakMap<StageToolHost, { url: string; version: number; views: GapView[] }>();
+
+/** How many image batches the scene holds: it changes every time a fill lands, which is what retires an id. */
+const sceneVersion = (doc: StageDoc) => doc.scene?.viggle?.batchIds.length ?? 0;
+
+/** Why this scene cannot be filled, or null when it can. A check works on any scene; a fill needs the Viggle session. */
+function fillBlock(doc: StageDoc): string | null {
+  if (!doc.scene) return 'No scene yet: set_scene first.';
+  if (!doc.scene.viggle?.sessionId) return 'This scene cannot be filled: only a scene generated here keeps its Viggle session (a preset or imported file has none). Keep people and cameras away from the gaps, or generate a new scene.';
+  if (!doc.scene.placement) return 'The scene is not measured yet: call get_world_layout, then try again.';
+  if (!doc.scene.placement.upright) return 'This scene file is stored in a frame fills cannot be aimed in (only .spz scenes can be filled).';
+  return null;
+}
+
+const pct = (v: number) => `${Math.round(v * 1000) / 10}%`;
+
+/** Check a fill_scene_view call and turn it into the pose to shoot from; throws a ToolError saying what to change. */
+async function planFill(i: Record<string, any>, host: StageToolHost): Promise<{ pose: { position: Vec3Tuple; yaw: number; pitch: number } }> { // eslint-disable-line @typescript-eslint/no-explicit-any
+      const doc = host.getDoc();
+      const block = fillBlock(doc);
+      if (block) throw new ToolError(block);
+      if (!host.assets.fillView) throw new ToolError('Filling is not set up here (no API key on the server).');
+      let pose: { position: Vec3Tuple; yaw: number; pitch: number };
+      if (i.view_id !== undefined && i.view_id !== '') {
+        if (i.position !== undefined || i.yaw !== undefined || i.pitch !== undefined) throw new ToolError('Give EITHER view_id OR position, yaw and pitch, not both.');
+        const m = /^g(\d+)@(\d+)$/.exec(String(i.view_id).trim());
+        if (!m) throw new ToolError(`"${i.view_id}" is not a view id: use one from find_scene_gaps, like g1@0.`);
+        const version = sceneVersion(doc);
+        if (Number(m[2]) !== version) throw new ToolError(`That id is from version ${m[2]} of the scene and it is now version ${version}: a fill rebuilds the scene, so call find_scene_gaps again.`);
+        const last = lastCheck.get(host);
+        const v = last && last.url === doc.scene!.url && last.version === version ? last.views.find((k) => k.id === `g${m[1]}`) : undefined;
+        if (!v) throw new ToolError('No check on record for this scene: call find_scene_gaps first.');
+        pose = { position: v.position, yaw: v.yaw, pitch: v.pitch };
+      } else {
+        const p = i.position as number[] | undefined;
+        if (!Array.isArray(p) || p.length !== 3 || typeof i.yaw !== 'number' || typeof i.pitch !== 'number') throw new ToolError('Give a view_id, or position [x, y, z] with yaw and pitch.');
+        if (p[1]! < 0.2 || p[1]! > 3) throw new ToolError('A camera at that height is outside the room: use y between 0.2 and 3 metres.');
+        pose = { position: [p[0]!, p[1]!, p[2]!], yaw: i.yaw, pitch: clamp(i.pitch, -89, 89) };
+      }
+  const running = (await host.assets.jobs?.().catch(() => []))?.find((j) => j.kind === 'fill' && j.status === 'processing');
+  if (running) throw new ToolError(`A fill is already running (job ${running.id}): a scene takes one edit at a time. Wait for check_jobs to say ready.`);
+  return { pose };
+}
 
 export const STAGE_TOOLS: StageTool[] = [
   // ── Look ──
@@ -301,7 +372,7 @@ export const STAGE_TOOLS: StageTool[] = [
   {
     name: 'check_framing',
     effect: 'read',
-    description: 'Numbers instead of a picture: for a shot at given times, each character\'s whole-body box in the frame (0..1, x right, y down), the share of the body inside, which edges cut it, whether the head is in frame, `line_of_sight` from the lens to them (clear / partly_blocked / blocked - by furniture, a plant, a wall, or a smear the camera has backed into: change the side, height or distance), height in frame and distance; and `camera_over_floor` (false: the camera has left the scene\'s reconstructed area). Tighter sizes than "full" cut the body by design - judge them by `head_in_frame`. Cheap: use it across a whole move ("is she still in frame at the end of the dolly?").',
+    description: 'Numbers instead of a picture: for a shot at given times, each character\'s whole-body box in the frame (0..1, x right, y down), the share of the body inside, which edges cut it, whether the head is in frame, `line_of_sight` from the lens to them (clear / partly_blocked / blocked - by furniture, a plant, a wall, or a smear the camera has backed into: change the side, height or distance), height in frame and distance; and `camera_over_floor` (false: the camera has left the scene\'s reconstructed area), and `scene_gap` - the share of the frame that is hole (nothing reconstructed) or blur (a smear) in the scene itself, whoever is in it (over 25% is a warning: aim elsewhere or fill the scene). Tighter sizes than "full" cut the body by design - judge them by `head_in_frame`. Cheap: use it across a whole move ("is she still in frame at the end of the dolly?").',
     input_schema: { type: 'object', properties: { shot_id: { type: 'string' }, times: { type: 'array', items: NUM, description: 'Default: the shot\'s start, middle and end.' } }, required: ['shot_id'] },
     async run(i, host) {
       const r = host.renderer;
@@ -313,11 +384,16 @@ export const STAGE_TOOLS: StageTool[] = [
       const span = shotSpan(shot);
       if (!span) return fail('That shot has no camera keys.');
       const times: number[] = Array.isArray(i.times) && i.times.length ? i.times : [span[0], (span[0] + span[1]) / 2, span[1]];
+      // How much of the frame is scene gap (a hole or a smear), when the scene can be read.
+      const sample = doc.scene?.placement ? r.cloudSample() : null;
+      const capture = doc.scene?.placement ? fileToWorldPoint(placeWalkScene(doc.scene.placement), [0, 0, 0]) : null;
       return ok(times.map((t) => {
         const cam = sampleShot(shot, t)!;
+        const dir: Vec3Tuple = [cam.target[0] - cam.position[0], cam.target[1] - cam.position[1], cam.target[2] - cam.position[2]];
+        const gap = sample && capture ? measureFrame(sample, { capture: [capture.x, capture.y, capture.z] }, cam.position, dir, cam.fov, ASPECTS[doc.aspect]) : null;
         // A camera with no floor under it has left the reconstruction: expect smears.
         const overFloor = r.floorAt(cam.position[0], cam.position[2], cam.position[1]) !== null;
-        return { t, camera_over_floor: overFloor, characters: r.framing(cam, ASPECTS[doc.aspect], t).map(({ id: _id, inFront: _f, ...f }) => f) };
+        return { t, camera_over_floor: overFloor, ...(gap ? { scene_gap: { hole: pct(gap.hole), blur: pct(gap.blur), ...(gap.hole + gap.blur > 0.25 ? { warning: 'much of this frame is hole or smear in the scene itself: aim away, or find_scene_gaps / fill it.' } : {}) } } : {}), characters: r.framing(cam, ASPECTS[doc.aspect], t).map(({ id: _id, inFront: _f, ...f }) => f) };
       }));
     },
   },
@@ -391,7 +467,86 @@ export const STAGE_TOOLS: StageTool[] = [
     input_schema: { type: 'object', properties: {} },
     async run(_i, host) {
       if (!host.assets.jobs) return ok([]);
-      return ok((await host.assets.jobs()).map((j) => ({ id: j.id, kind: j.kind, status: j.status, asset_id: j.assetId, error: j.error, label: j.label })));
+      return ok((await host.assets.jobs()).map((j) => ({
+        id: j.id, kind: j.kind, status: j.status, asset_id: j.assetId, error: j.error, label: j.label,
+        ...(j.kind === 'fill' && j.status === 'ready' ? { next: 'set_scene with this asset_id to see the filled scene.' } : {}),
+      })));
+    },
+  },
+
+  {
+    name: 'find_scene_gaps',
+    effect: 'read',
+    description: 'Check the scene itself for defects, as a detector: where a camera could stand and look to see HOLES (nothing reconstructed - the floor behind a pillar, the wall behind a sofa) or BLUR (reconstructed too coarsely: a smear). A scene is built from ONE viewpoint, so it only knows what that point saw. Returns up to 6 views, best first, with their share of hole and blur, a pose in stage metres and a `look_at` point for `look`. Free, no picture; a second or two. It can miss what a picture shows, and an empty list does not mean the scene is clean: `look` at a doubtful view. Ids carry the scene version (g1@0) and are void once a fill lands. Use it after a scene is set, before shots and people go near the gaps.',
+    input_schema: { type: 'object', properties: {} },
+    async run(_i, host) {
+      const doc = host.getDoc();
+      const r = host.renderer;
+      if (!r) return fail('No renderer: checking the scene needs it loaded in the editor.');
+      if (!doc.scene) return fail('No scene yet: set_scene first.');
+      r.setDoc(doc);
+      await settle(r);
+      if (!doc.scene.placement) return fail('The scene is not measured yet: call get_world_layout first.');
+      const sample = r.cloudSample();
+      if (!sample || sample.positions.length < 3000) return fail('This scene has no splat data the editor can read (a streamed scene), so it cannot be checked. Use `look` instead.');
+      const mount = placeWalkScene(doc.scene.placement);
+      const c = fileToWorldPoint(mount, [0, 0, 0]);
+      const result = checkScene(sample, { capture: [c.x, c.y, c.z] });
+      const version = sceneVersion(doc);
+      lastCheck.set(host, { url: doc.scene.url, version, views: result.views });
+      const block = fillBlock(doc);
+      const views = result.views.map((v) => {
+        const at = v.position, f = v.forward;
+        return {
+          id: `${v.id}@${version}`, role: v.role, hole: pct(v.hole), blur: pct(v.blur),
+          position: v3(at), yaw: v.yaw, pitch: v.pitch,
+          look_at: v3([at[0] + f[0] * 3, at[1] + f[1] * 3, at[2] + f[2] * 3]),
+          ...(v.role === 'candidate' ? { weaker: true } : {}),
+        };
+      });
+      return ok({
+        scene: doc.scene.name, version, views,
+        can_fill: block === null, ...(block ? { fill_blocked: block } : {}),
+        ...(result.undefinedShare > 0.05 ? { warning: `${pct(result.undefinedShare)} of the directions from the capture point show nothing: this scene has large gaps from the start.` } : {}),
+        note: views.length
+          ? 'HOLE = nothing reconstructed, BLUR = reconstructed too coarsely; both are shares of a 100 degree frame, the one a fill is generated at. The order weighs nearness and framing, not the size of the numbers. `look` at a view first (camera.position, camera.look_at) to see it, then fill_scene_view with its id. Each fill costs credits and rebuilds the scene: ids from before are void.'
+          : 'Found nothing worth filling - which does not mean the scene is clean. Use `look` from a couple of angles you intend to shoot; fill only a view whose picture shows a defect, otherwise say the scene came out clean.',
+        measured: { positions: result.domain, ms: result.ms },
+      });
+    },
+  },
+  {
+    name: 'fill_scene_view',
+    effect: 'cost',
+    description: 'Repair the scene from one camera pose: Viggle generates a view there and rebuilds the scene from every view it holds (1-3 minutes). SPENDS CREDITS (about 8 for the first fill, one more each time) - the user confirms each one. Give `view_id` from find_scene_gaps (with its @version), or `position` [x, y, z] in stage metres with `yaw` and `pitch` for a defect you saw in a `look`. One pose per call, one fill at a time. The result is a NEW scene asset: when check_jobs says ready, call set_scene with it, then find_scene_gaps again. Only scenes generated here can be filled.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        view_id: { type: 'string', description: 'From find_scene_gaps, e.g. g1@0. Preferred.' },
+        position: { type: 'array', items: NUM, minItems: 3, maxItems: 3, description: '[x, y, z] stage metres, y up. Omit with view_id.' },
+        yaw: { ...NUM, description: 'Degrees, as for characters: 0 looks -Z, 90 looks -X.' },
+        pitch: { ...NUM, description: 'Degrees, positive looks up.' },
+      },
+    },
+    async precheck(i, host) {
+      try { await planFill(i, host); return null; } catch (e) { return e instanceof ToolError ? e.message : String(e); }
+    },
+    async run(i, host) {
+      const doc = host.getDoc();
+      const { pose } = await planFill(i, host);
+      if (!host.assets.fillView) return fail('Filling is not set up here (no API key on the server).');
+      // The editor's frame -> the scene file's: the camera is stood where the file's own units say.
+      const mount = placeWalkScene(doc.scene!.placement!);
+      const job = await host.assets.fillView({
+        sceneUrl: doc.scene!.url,
+        position: worldToFilePoint(mount, pose.position),
+        yaw: pose.yaw - mount.rotation.y,
+        pitch: pose.pitch,
+      });
+      return ok({
+        job_id: job.id, status: job.status, credits: job.credits,
+        note: 'Started: takes one to three minutes. Poll check_jobs; when it is ready call set_scene with its asset id (the scene changes under you, so people and shots stay as they are), then find_scene_gaps again. Say what you filled and what it cost.',
+      });
     },
   },
 
@@ -660,6 +815,7 @@ export const STAGE_TOOLS: StageTool[] = [
       required: ['shot_id', 'subject'],
     },
     async run(i, host) {
+      checkFraming(i);
       const doc = host.getDoc();
       const shot = findShot(doc, i.shot_id);
       const t = Math.max(0, i.time ?? 0);
@@ -688,6 +844,7 @@ export const STAGE_TOOLS: StageTool[] = [
       required: ['shot_id', 'kind', 'subject'],
     },
     async run(i, host) {
+      checkFraming(i);
       const doc = host.getDoc();
       const shot = findShot(doc, i.shot_id);
       const start = Math.max(0, i.start ?? 0);
@@ -854,6 +1011,7 @@ function faceYaw(host: StageToolHost, doc: StageDoc, at: Vec3Tuple, face: unknow
   if (shot) {
     const cam = sampleShot(shot, t);
     if (cam) return yawToward(at, cam.position);
+    throw new ToolError(`Shot "${shot.name}" has no camera yet, so there is nothing to face: frame_shot it first, then set the facing.`);
   }
   const c = findCharacter(doc, face);
   return yawToward(at, placeAt(host, c, t).position);

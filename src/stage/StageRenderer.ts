@@ -611,6 +611,15 @@ export class StageRenderer {
     }
   }
 
+  /**
+   * A strided sample of the scene's splat centres in world metres, with each one's alpha; null
+   * before a scene has loaded. What the scene check measures.
+   */
+  cloudSample(): { positions: Float32Array; alpha: Float32Array | null } | null {
+    const s = this.worldSample();
+    return s ? { positions: s.positions, alpha: s.alpha } : null;
+  }
+
   private floor(): FloorIndex | null {
     return this.worldSample()?.index ?? null;
   }

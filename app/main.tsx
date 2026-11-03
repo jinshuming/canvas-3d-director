@@ -37,4 +37,7 @@ function App() {
   return <Worlds />;
 }
 
+// The evaluation runner (see eval/index.js), dev only.
+if (import.meta.env.DEV) void import('../eval/index.js');
+
 createRoot(document.getElementById('root')!).render(<App />);

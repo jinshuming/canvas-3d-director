@@ -7,6 +7,8 @@ export interface LibraryScene {
   url: string;
   panoramaUrl: string | null;
   viggle: { sessionId: string; batchIds: string[] } | null;
+  /** The scene this one is a filled-in version of. */
+  parentId?: string;
   createdAt: string;
 }
 
@@ -29,9 +31,20 @@ export interface LibraryMotion {
   createdAt: string;
 }
 
+/** Where a fill is: the new view is being generated, then the scene rebuilt from every view it now has. */
+export interface FillState {
+  /** The library scene being filled; the new one is derived from it. */
+  sceneId: string;
+  sessionId: string;
+  /** Batches the rebuild will read: the scene's own, plus the new view's once it exists. */
+  batchIds: string[];
+  phase: 'generate' | 'reconstruct';
+}
+
 export interface GenJob {
   id: string;
-  kind: 'scene' | 'character' | 'motion';
+  kind: 'scene' | 'character' | 'motion' | 'fill';
+  fill?: FillState;
   /** The Viggle task / character / motion id. */
   remoteId: string;
   label: string;
@@ -90,3 +103,13 @@ export const PRESET_MOTIONS: LibraryMotion[] = [
 
 /** Credits each generation costs (docs.viggle.ai/v1/pricing). */
 export const COSTS = { scene: 6, character: 30, motion: 10 } as const;
+
+/**
+ * What filling one view of a generated scene costs, in credits (Viggle's public prices): the new
+ * view is 1, and the rebuild is 1 per view the scene will then hold - the 6 of the panorama, 1 per
+ * earlier fill, and the new one. `batches` is how many image batches the scene has now.
+ */
+export function fillCredits(batches: number): number {
+  const views = 6 + Math.max(0, batches - 1);
+  return 1 + views + 1;
+}
