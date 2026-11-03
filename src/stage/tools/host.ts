@@ -51,7 +51,8 @@ export interface AssetRef {
 
 export interface GenerationJob {
   id: string;
-  kind: AssetKind;
+  /** `fill`: one more view of a generated scene; it ends in a new scene asset. */
+  kind: AssetKind | 'fill';
   status: 'processing' | 'ready' | 'failed';
   label: string;
   credits: number;
@@ -63,6 +64,12 @@ export interface AssetSource {
   list(kind: AssetKind): Promise<AssetRef[]>;
   /** Spends credits. Absent where generation is not set up. */
   generate?(kind: AssetKind, input: Record<string, unknown>): Promise<GenerationJob>;
+  /**
+   * Spends credits: generate one more view of a scene made here, from a camera given in the scene
+   * FILE's own frame, and rebuild the scene from every view it holds. The job ends in a new scene
+   * asset. Absent where generation is not set up.
+   */
+  fillView?(input: { sceneUrl: string; position: [number, number, number]; yaw: number; pitch: number }): Promise<GenerationJob>;
   jobs?(): Promise<GenerationJob[]>;
 }
 

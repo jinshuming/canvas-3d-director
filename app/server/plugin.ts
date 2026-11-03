@@ -106,6 +106,30 @@ export function directorServer(opts: DirectorServerOptions): Plugin {
       remoteId = String(task.id);
       label = prompt;
       credits = Number(task.credits ?? 6);
+    } else if (kind === 'fill') {
+      const scene = library.scenes.find((s) => s.id === String(input.sceneId ?? '') || s.url === String(input.sceneUrl ?? ''));
+      if (!scene) throw httpError(404, 'That scene is not in the library.');
+      if (!scene.viggle?.sessionId || !scene.viggle.batchIds.length) throw httpError(400, 'Only scenes generated here can be filled: this one has no Viggle session.');
+      const position = input.position as number[] | undefined;
+      if (!Array.isArray(position) || position.length !== 3 || position.some((v) => typeof v !== 'number' || !Number.isFinite(v))) throw httpError(400, "position must be [x, y, z] in the scene file's frame.");
+      const task = await viggle('/v1/scenes/generate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: scene.viggle.sessionId,
+          referenceBatchIds: scene.viggle.batchIds,
+          targetPosition: { position, yaw: Number(input.yaw ?? 0), pitch: Math.max(-90, Math.min(90, Number(input.pitch ?? 0))) },
+          projection: 'perspective',
+          fov: 100,
+        }),
+      });
+      const filling: GenJob = {
+        id: `job_${randomUUID().slice(0, 12)}`, kind, remoteId: String(task.id), label: `补全视角 · ${scene.name}`.slice(0, 60), status: 'processing',
+        credits: Number(task.credits ?? 1), error: null, assetId: null, createdAt: new Date().toISOString(),
+        fill: { sceneId: scene.id, sessionId: scene.viggle.sessionId, batchIds: scene.viggle.batchIds, phase: 'generate' },
+      };
+      library.jobs.unshift(filling);
+      await saveLibrary();
+      return filling;
     } else if (kind === 'character') {
       const form = new FormData();
       form.set('type', 'vsplat');
@@ -158,6 +182,8 @@ export function directorServer(opts: DirectorServerOptions): Plugin {
         };
         library.scenes.unshift(scene);
         done(job, id);
+      } else if (job.kind === 'fill') {
+        await pollFill(job);
       } else if (job.kind === 'character') {
         const c = await viggle(`/v1/characters/${encodeURIComponent(job.remoteId)}`);
         if (c.status === 'failed' || c.status === 'cancelled') return fail(job, (c.error as { message?: string })?.message ?? 'Character failed');
@@ -188,6 +214,45 @@ export function directorServer(opts: DirectorServerOptions): Plugin {
       const status = (e as { status?: number }).status ?? 0;
       if (status >= 400 && status < 500 && status !== 429) fail(job, message(e));
     }
+  }
+
+  /**
+   * A fill is two Viggle tasks in a row on one session: generate the new view, then rebuild the scene
+   * from every view it holds. The session takes one task at a time, so the second is submitted only
+   * when the first is ready.
+   */
+  async function pollFill(job: GenJob): Promise<void> {
+    const f = job.fill;
+    if (!f) return fail(job, 'A fill with no state.');
+    const task = await viggle(`/v1/scenes/${encodeURIComponent(job.remoteId)}`);
+    if (task.status === 'failed' || task.status === 'cancelled') return fail(job, (task.error as { message?: string })?.message ?? 'Fill failed');
+    if (task.status !== 'ready') return;
+    const result = task.result as { spz?: { url: string } | null; outputBatch?: { batchId: string } | null };
+    if (f.phase === 'generate') {
+      const batch = result.outputBatch?.batchId;
+      if (!batch) return fail(job, 'Viggle returned no new view.');
+      const batchIds = [...f.batchIds, batch];
+      const next = await viggle('/v1/scenes/reconstruct', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: f.sessionId, referenceBatchIds: batchIds }),
+      });
+      job.remoteId = String(next.id);
+      job.credits += Number(next.credits ?? 0);
+      job.fill = { ...f, batchIds, phase: 'reconstruct' };
+      await saveLibrary();
+      return;
+    }
+    if (!result.spz?.url) return fail(job, 'Viggle returned no rebuilt scene.');
+    const parent = library.scenes.find((s) => s.id === f.sceneId);
+    const id = `scn_${job.id.slice(4)}`;
+    const url = await download(result.spz.url, `${id}.spz`);
+    const fills = f.batchIds.length - 1;
+    const base = (parent?.name ?? 'Scene').replace(/ · 补全\d+$/, '');
+    library.scenes.unshift({
+      id, name: `${base} · 补全${fills}`.slice(0, 60), url, panoramaUrl: parent?.panoramaUrl ?? null, parentId: f.sceneId,
+      viggle: { sessionId: f.sessionId, batchIds: f.batchIds }, createdAt: new Date().toISOString(),
+    });
+    done(job, id);
   }
 
   function done(job: GenJob, assetId: string) {
@@ -405,7 +470,7 @@ export function directorServer(opts: DirectorServerOptions): Plugin {
     }
 
     if (p === '/api/library' && m === 'GET') return json(res, library);
-    const gen = /^\/api\/gen\/(scene|character|motion)$/.exec(p);
+    const gen = /^\/api\/gen\/(scene|character|motion|fill)$/.exec(p);
     if (gen && m === 'POST') return json(res, await submit(gen[1] as GenJob['kind'], await readJson(req) as Record<string, unknown>));
     const dismiss = /^\/api\/jobs\/([^/]+)$/.exec(p);
     if (dismiss && m === 'DELETE') {

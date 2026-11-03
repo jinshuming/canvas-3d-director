@@ -37,6 +37,10 @@ export function createDirectorHost(o: {
         const j = await api.generate(kind, input);
         return { id: j.id, kind: j.kind, status: j.status, label: j.label, credits: j.credits, assetId: j.assetId, error: j.error };
       },
+      async fillView(input): Promise<GenerationJob> {
+        const j = await api.generate('fill', input);
+        return { id: j.id, kind: j.kind, status: j.status, label: j.label, credits: j.credits, assetId: j.assetId, error: j.error };
+      },
       async jobs(): Promise<GenerationJob[]> {
         const lib = await api.library();
         return lib.jobs.map((j) => ({ id: j.id, kind: j.kind, status: j.status, label: j.label, credits: j.credits, assetId: j.assetId, error: j.error }));

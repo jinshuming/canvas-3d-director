@@ -191,3 +191,115 @@ test('set_edit cuts shots into a film the agent can read back', async () => {
   assert.deepEqual(host.doc.cuts, []);
   assert.ok((await runStageTool('set_edit', { cuts: [{ shot_id: 'nope', start: 0 }] }, host)).is_error);
 });
+
+test('framing words in the wrong slot are rejected with a hint, not turned into a NaN camera', async () => {
+  const host = fakeHost();
+  host.doc.characters.push({ id: 'c1', name: 'Frodo', url: 'f.vsplat', position: [0, 0, -2], yaw: 0, height: 1.7, clips: [] });
+  host.doc.shots.push({ id: 's1', name: 'A', keys: [], interpolation: 'smooth', easing: 'easeInOut' });
+  const bad = await runStageTool('frame_shot', { shot_id: 's1', subject: 'c1', size: 'wide', angle: 'front' }, host);
+  assert.equal(bad.is_error, true);
+  assert.match(JSON.stringify(bad.content), /is a side/);
+  const bad2 = await runStageTool('camera_move', { shot_id: 's1', kind: 'push_in', subject: 'c1', size: 'wide', to_size: 'close' }, host);
+  assert.equal(bad2.is_error, true);
+  const good = await runStageTool('frame_shot', { shot_id: 's1', subject: 'c1', size: 'wide', side: 'front', angle: 'low' }, host);
+  assert.notEqual(good.is_error, true);
+});
+
+test('a single-subject framing ignores the optional fields the model fills in anyway', async () => {
+  const host = fakeHost();
+  json(await runStageTool('add_character', { asset: 'Frodo', position: [0, -1.5], name: 'A' }, host));
+  const { shot_id } = json(await runStageTool('add_shot', { name: 'S' }, host));
+  for (const extra of [{ with: '' }, { with: 'none' }, { with: 'A' }]) {
+    const r = await runStageTool('frame_shot', { shot_id, subject: 'A', size: 'wide', framing: 'single', offset: 0, ...extra }, host);
+    assert.notEqual(r.is_error, true, JSON.stringify(r.content));
+  }
+  const m = await runStageTool('camera_move', { shot_id, kind: 'push_in', subject: 'A', size: 'wide', to_size: 'close_up', with: '', framing: 'single' }, host);
+  assert.notEqual(m.is_error, true, JSON.stringify(m.content));
+});
+
+test('facing a shot that has no camera yet says so', async () => {
+  const host = fakeHost();
+  json(await runStageTool('add_character', { asset: 'Frodo', position: [0, -1.5], name: 'A' }, host));
+  const { shot_id } = json(await runStageTool('add_shot', { name: 'Empty' }, host));
+  const r = await runStageTool('update_character', { character: 'A', face: shot_id }, host);
+  assert.equal(r.is_error, true);
+  assert.match(JSON.stringify(r.content), /no camera yet/);
+});
+
+// ── Scene check and fill ────────────────────────────────────────────────────
+
+/** A generated, measured .spz scene with a 8 x 3 x 8 m room sampled from its capture point, minus a patch of the -X wall. */
+function sceneHost() {
+  const host = fakeHost() as ReturnType<typeof fakeHost> & { fills: unknown[]; jobs: unknown[] };
+  host.fills = [];
+  host.jobs = [];
+  host.doc.scene = { name: 'Gen room', url: '/files/scn_1.spz', placement: { upright: true, scale: 1, floor: -1.5, start: [0, 0] }, viggle: { sessionId: 'dir_1', batchIds: ['b0'] } };
+  let s = 7;
+  const rnd = () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
+  const pts: number[] = [];
+  while (pts.length < 90_000 * 3) {
+    const z = rnd() * 2 - 1, a = rnd() * Math.PI * 2, r = Math.sqrt(1 - z * z);
+    const d = [r * Math.cos(a), z, r * Math.sin(a)] as const;
+    const tx = d[0] > 0 ? 4 / d[0] : d[0] < 0 ? -4 / d[0] : Infinity;
+    const tz = d[2] > 0 ? 4 / d[2] : d[2] < 0 ? -4 / d[2] : Infinity;
+    const ty = d[1] > 0 ? 1.5 / d[1] : d[1] < 0 ? -1.5 / d[1] : Infinity;
+    const t = Math.min(tx, ty, tz);
+    const yaw = (Math.atan2(-d[0], -d[2]) * 180) / Math.PI;
+    const pitch = (Math.asin(d[1]) * 180) / Math.PI;
+    if (Math.abs(((yaw - 90 + 540) % 360) - 180) < 25 && pitch > -20 && pitch < 40) continue;
+    pts.push(d[0] * t, 1.5 + d[1] * t, d[2] * t);
+  }
+  const positions = Float32Array.from(pts);
+  (host as { renderer: unknown }).renderer = {
+    setDoc: () => {}, getAssetState: () => ({ sceneLoading: false, loadingCharacters: [], loadingClips: [], errors: [] }),
+    cloudSample: () => ({ positions, alpha: null }),
+  };
+  (host.assets as unknown as Record<string, unknown>).fillView = async (input: unknown) => { host.fills.push(input); return { id: 'job_1', kind: 'fill', status: 'processing', label: 'fill', credits: 1, assetId: null, error: null }; };
+  (host.assets as unknown as Record<string, unknown>).jobs = async () => host.jobs;
+  return host;
+}
+
+test('find_scene_gaps lists views that look at the gap, with ids that carry the scene version', async () => {
+  const host = sceneHost();
+  const r = json(await runStageTool('find_scene_gaps', {}, host));
+  assert.equal(r.can_fill, true);
+  assert.ok(r.views.length >= 1);
+  assert.match(r.views[0].id, /^g1@1$/, 'version = batches the scene holds');
+  assert.ok(parseFloat(r.views[0].hole) > 5);
+  // The gap is on the -X wall (yaw 90): the best view looks that way.
+  assert.ok(Math.abs(((r.views[0].yaw - 90 + 540) % 360) - 180) < 75);
+  assert.ok(r.views[0].look_at.length === 3);
+});
+
+test('fill_scene_view takes an id, aims in the scene file\'s frame, and refuses a stale one before the user is asked', async () => {
+  const host = sceneHost();
+  const tool = STAGE_TOOLS.find((t) => t.name === 'fill_scene_view')!;
+  assert.equal(tool.effect, 'cost');
+  // No check yet.
+  assert.match((await tool.precheck!({ view_id: 'g1@1' }, host))!, /find_scene_gaps first/);
+  const check = json(await runStageTool('find_scene_gaps', {}, host));
+  assert.equal(await tool.precheck!({ view_id: 'g1@1' }, host), null);
+  const run = json(await runStageTool('fill_scene_view', { view_id: 'g1@1' }, host));
+  assert.equal(run.job_id, 'job_1');
+  const sent = host.fills[0] as { sceneUrl: string; position: number[]; yaw: number; pitch: number };
+  assert.equal(sent.sceneUrl, '/files/scn_1.spz');
+  // The mount: scale 1, floor -1.5 upright -> world = file + (0, 1.5, 0): the capture point stands 1.5 m up.
+  const v = check.views[0];
+  assert.ok(near(sent.position[0], v.position[0], 1e-6) && near(sent.position[1], v.position[1] - 1.5, 1e-6) && near(sent.position[2], v.position[2], 1e-6));
+  assert.equal(sent.yaw, v.yaw);
+  // A fill lands: the scene now has 2 batches, so the old id is void.
+  host.doc.scene!.viggle!.batchIds.push('b1');
+  assert.match((await tool.precheck!({ view_id: 'g1@1' }, host))!, /version 1.*now version 2/);
+});
+
+test('fill_scene_view refuses what cannot be filled, and a second fill while one runs', async () => {
+  const host = sceneHost();
+  const tool = STAGE_TOOLS.find((t) => t.name === 'fill_scene_view')!;
+  assert.match((await tool.precheck!({ position: [0, 5, 0], yaw: 0, pitch: 0 }, host))!, /outside the room/);
+  assert.equal(await tool.precheck!({ position: [1, 1.4, 0], yaw: 90, pitch: 0 }, host), null);
+  host.jobs.push({ id: 'job_9', kind: 'fill', status: 'processing' });
+  assert.match((await tool.precheck!({ position: [1, 1.4, 0], yaw: 90, pitch: 0 }, host))!, /already running/);
+  host.jobs.length = 0;
+  host.doc.scene!.viggle = null;
+  assert.match((await tool.precheck!({ position: [1, 1.4, 0], yaw: 90, pitch: 0 }, host))!, /only a scene generated here/);
+});

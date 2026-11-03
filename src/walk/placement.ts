@@ -111,6 +111,21 @@ export function fileToWorldPoint(t: SceneTransform, [x, y, z]: readonly [number,
 }
 
 /**
+ * The inverse of `fileToWorldPoint`: where a world point is in the file's own frame. Only for
+ * upright (+Y up) files, whose mount is a turn about Y, a uniform scale and a shift.
+ */
+export function worldToFilePoint(t: SceneTransform, [x, y, z]: readonly [number, number, number]): [number, number, number] {
+  let px = x - t.position.x, py = y - t.position.y, pz = z - t.position.z;
+  const turn = (-t.rotation.y * Math.PI) / 180;
+  if (turn !== 0) {
+    const c = Math.cos(turn), n = Math.sin(turn);
+    [px, pz] = [px * c + pz * n, -px * n + pz * c];
+  }
+  const s = t.scale;
+  return [px / s, py / s, pz / s];
+}
+
+/**
  * A compass direction given in the file's frame (0 = +Z, 90 = +X), in the
  * world. A flipped file runs its Z the other way, so it is mirrored first.
  */

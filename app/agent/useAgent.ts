@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import type { StageToolHost, ToolResult } from '@stage';
+import type { StageDoc, StageToolHost, ToolResult } from '@stage';
 import { runStageTool, STAGE_TOOLS } from '@stage';
 
 import { api } from '../api.ts';
+import { fillCredits } from '../shared/library.ts';
 import type { ChatItem, WorldChat } from '../shared/world.ts';
 import { storableChat } from '../shared/world.ts';
 
@@ -92,10 +93,14 @@ export function useAgent(worldId: string, initial: WorldChat, host: StageToolHos
         const replyId = uid();
         let replyStarted = false;
         const last = step === MAX_STEPS - 1;
-        const response = await streamTurn(input, previousId.current, ctl.signal, last, (delta) => {
-          if (!replyStarted) { replyStarted = true; push({ kind: 'assistant', id: replyId, text: delta, streaming: true }); } else {
-            setItems((xs) => xs.map((x) => (x.id === replyId && x.kind === 'assistant' ? { ...x, text: x.text + delta } : x)));
-          }
+        const response = await withRetry(ctl.signal, () => {
+          // A retried turn starts its reply over: drop what the failed attempt streamed.
+          if (replyStarted) { replyStarted = false; setItems((xs) => xs.filter((x) => x.id !== replyId)); }
+          return streamTurn(input, previousId.current, ctl.signal, last, (delta) => {
+            if (!replyStarted) { replyStarted = true; push({ kind: 'assistant', id: replyId, text: delta, streaming: true }); } else {
+              setItems((xs) => xs.map((x) => (x.id === replyId && x.kind === 'assistant' ? { ...x, text: x.text + delta } : x)));
+            }
+          });
         });
         if (replyStarted) patch(replyId, { streaming: false });
         previousId.current = response.id;
@@ -114,8 +119,15 @@ export function useAgent(worldId: string, initial: WorldChat, host: StageToolHos
           let result: ToolResult;
           try { args = JSON.parse(call.arguments || '{}') as Record<string, unknown>; } catch { /* the tool reports the bad input */ }
           const tool = STAGE_TOOLS.find((x) => x.name === call.name);
-          if (tool?.effect === 'cost' && !(await confirm(costText(args)))) {
-            result = { content: [{ type: 'text', text: 'The user declined to spend credits on this. Use an existing asset instead.' }], is_error: true };
+          const wrong = tool?.effect === 'cost' ? await tool.precheck?.(args, host) : null;
+          if (wrong) {
+            // Refused before the user is asked: a call that cannot work costs them no click.
+            result = { content: [{ type: 'text', text: wrong }], is_error: true };
+          } else if (tool?.effect === 'cost' && !(await confirm(costText(call.name, args, host.getDoc())))) {
+            const fill = call.name === 'fill_scene_view';
+            result = { content: [{ type: 'text', text: fill
+              ? 'The user declined to spend credits on this fill. Do not ask again: say what the check found and that they can ask you to fill it.'
+              : 'The user declined to spend credits on this. Use an existing asset instead.' }], is_error: true };
           } else {
             result = await runStageTool(call.name, args, host);
           }
@@ -166,8 +178,45 @@ export function useAgent(worldId: string, initial: WorldChat, host: StageToolHos
 interface FunctionCall { type: 'function_call'; name: string; arguments: string; call_id: string }
 interface ModelResponse { id: string; output?: Array<{ type: string } & Partial<FunctionCall>>; usage?: { input_tokens: number; output_tokens: number }; error?: { message?: string } | null }
 
+/** A model turn that dropped (stream cut, upstream 5xx / rate limit, stalled) is worth asking again; a stop or a 4xx is not. */
+async function withRetry<T>(signal: AbortSignal, attempt: () => Promise<T>, tries = 3): Promise<T> {
+  for (let n = 1; ; n++) {
+    try {
+      return await attempt();
+    } catch (e) {
+      if (signal.aborted || n >= tries || (e instanceof ModelError && !e.retryable)) throw e;
+      await new Promise((r) => setTimeout(r, 1500 * n));
+    }
+  }
+}
+
+class ModelError extends Error {
+  constructor(message: string, readonly retryable: boolean) { super(message); }
+}
+
+/** No bytes from the model for this long: the connection is dead, not thinking. */
+const STALL_MS = 90_000;
+
 /** One model turn through the server, streaming text deltas; resolves with the finished response. */
-async function streamTurn(input: unknown[], previousId: string | null, signal: AbortSignal, noTools: boolean, onText: (delta: string) => void): Promise<ModelResponse> {
+async function streamTurn(input: unknown[], previousId: string | null, outer: AbortSignal, noTools: boolean, onText: (delta: string) => void): Promise<ModelResponse> {
+  const stall = new AbortController();
+  let stalled = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const kick = () => { clearTimeout(timer); timer = setTimeout(() => { stalled = true; stall.abort(); }, STALL_MS); };
+  const signal = AbortSignal.any([outer, stall.signal]);
+  kick();
+  try {
+    return await readTurn(input, previousId, signal, noTools, onText, kick);
+  } catch (e) {
+    if (stalled && !outer.aborted) throw new ModelError('The model stopped responding.', true);
+    if (e instanceof ModelError || outer.aborted) throw e;
+    throw new ModelError(e instanceof Error ? e.message : String(e), true);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function readTurn(input: unknown[], previousId: string | null, signal: AbortSignal, noTools: boolean, onText: (delta: string) => void, kick: () => void): Promise<ModelResponse> {
   const res = await fetch('/api/agent/respond', {
     method: 'POST', signal,
     headers: { 'Content-Type': 'application/json' },
@@ -175,7 +224,7 @@ async function streamTurn(input: unknown[], previousId: string | null, signal: A
   });
   if (!res.ok || !res.body) {
     const body = await res.json().catch(() => null) as { error?: { message?: string } } | null;
-    throw new Error(body?.error?.message ?? `Agent request failed (${res.status})`);
+    throw new ModelError(body?.error?.message ?? `Agent request failed (${res.status})`, res.status === 429 || res.status >= 500);
   }
   const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
   let buf = '';
@@ -183,6 +232,7 @@ async function streamTurn(input: unknown[], previousId: string | null, signal: A
   for (;;) {
     const { value, done: end } = await reader.read();
     if (end) break;
+    kick();
     buf += value;
     let cut;
     while ((cut = buf.indexOf('\n\n')) >= 0) {
@@ -193,14 +243,19 @@ async function streamTurn(input: unknown[], previousId: string | null, signal: A
       const ev = JSON.parse(data) as { type: string; delta?: string; response?: ModelResponse; message?: string };
       if (ev.type === 'response.output_text.delta' && ev.delta) onText(ev.delta);
       else if (ev.type === 'response.completed' && ev.response) done = ev.response;
-      else if (ev.type === 'response.failed' || ev.type === 'error') throw new Error(ev.response?.error?.message ?? ev.message ?? 'The model failed.');
+      else if (ev.type === 'response.failed' || ev.type === 'error') throw new ModelError(ev.response?.error?.message ?? ev.message ?? 'The model failed.', true);
     }
   }
-  if (!done) throw new Error('The model stream ended early.');
+  if (!done) throw new ModelError('The model stream ended early.', true);
   return done;
 }
 
-function costText(args: Record<string, unknown>): string {
+function costText(tool: string, args: Record<string, unknown>, doc: StageDoc): string {
+  if (tool === 'fill_scene_view') {
+    const credits = fillCredits(doc.scene?.viggle?.batchIds.length ?? 1);
+    const where = typeof args.view_id === 'string' && args.view_id ? `（检测到的视角 ${args.view_id}）` : '（指定的位置）';
+    return `Agent 想补全场景的一个视角${where}：生成这个视角并重建整个场景，约需 1–3 分钟，会消耗约 ${credits} 额度。`;
+  }
   const credits = { scene: 6, character: 30, motion: 10 }[String(args.kind)] ?? '?';
   const what = { scene: '场景', character: '角色', motion: '动作' }[String(args.kind)] ?? '素材';
   const detail = String(args.prompt ?? args.image_url ?? '');
