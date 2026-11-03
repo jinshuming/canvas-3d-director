@@ -14,7 +14,7 @@
 | 用电影语言，不用坐标 | `frame_shot` / `camera_move` 收的是景别、角度、方位，比如"中景、低角度、左前四分之三"，由 `framing.ts` 换算成相机位置。坐标也收，用 `set_camera_keys` |
 | 先看再说完成 | 每次编辑后都能用 `look` / `contact_sheet` 看画面，用 `check_framing` 拿数字（入画比例、头在不在画面里、视线有没有被挡、相机有没有出场景），发现问题自己改 |
 | 错误可读 | 工具从不抛异常。调用写错了，会返回 `is_error` 和可以改正的信息，比如"没有这个角色，场上有：…" |
-| 花钱要确认 | 每个工具标了 `effect`：`read` 只读、`edit` 改片场、`cost` 扣额度（先问用户）、`ui` 操作界面 |
+| 花钱有上限 | 每个工具标了 `effect`：`read` 只读、`edit` 改片场、`cost` 扣额度、`ui` 操作界面。`cost` 默认**直接扣，不弹确认**，由 Agent 回复里说明花了多少；每次请求最多生成 4 次、补全 2 次，超过的被拒绝。想恢复确认卡片：`localStorage['director:spend'] = 'ask'`；评测用 `window.__spendMode = 'deny'`，调用照常发起但不花钱 |
 | 宿主无关 | 工具只依赖 `StageToolHost`：读写文档、渲染器、素材库、界面钩子。浏览器里跑全部工具；服务端 agent loop 可以把"看"的工具转发给页面执行（the reference product 叫 client tools），编辑工具是纯函数，在哪都能跑 |
 
 返回格式就是 Messages API 的 `tool_result` 内容：文字加 base64 JPEG。把 `stageToolDefinitions()` 直接作为 `tools` 传给模型，用 `runStageTool(name, input, host)` 执行。
@@ -36,8 +36,8 @@
 | 工具 | 用途 |
 |---|---|
 | `list_assets` | 场景、角色、动作，包括 Viggle 预置和本项目生成的 |
-| `generate_asset` | **扣额度**：生成场景（6）、角色（30）、动作（10） |
-| `fill_scene_view` | **扣额度**（首次约 8，之后每次多 1，用户逐次确认）：从一个视角补全场景。传 `find_scene_gaps` 的 `view_id`，或位置 + 偏航 + 俯仰。Viggle 生成这个视角，再用全部视角重建，约 1–3 分钟，结果是一个**新场景素材**。只有在本项目里生成的场景能补 |
+| `generate_asset` | **扣额度，直接生成**：场景（6，文字）、角色（30，**文字描述和/或全身图片**，文字单独就能生成，Viggle `type=vsplat` + `enhance_prompt`）、动作（10，文字） |
+| `fill_scene_view` | **扣额度**（首次约 8，之后每次多 1，直接扣）：从一个视角补全场景。传 `find_scene_gaps` 的 `view_id`，或位置 + 偏航 + 俯仰。Viggle 生成这个视角，再用全部视角重建，约 1–3 分钟，结果是一个**新场景素材**。只有在本项目里生成的场景能补 |
 | `check_jobs` | 生成任务状态，完成后给出素材 id |
 
 
@@ -106,7 +106,7 @@ contact_sheet    {frames: 6}                      → 走路、转身、挥手�
 
 ## 接 Agent（M2）还需要做的
 
-1. **服务端 agent loop**：Claude 加上 `stageToolDefinitions()`。`effect: 'cost'` 的工具先暂停，等用户确认。
+1. **服务端 agent loop**：Claude 加上 `stageToolDefinitions()`。`effect: 'cost'` 的工具由宿主决定要不要先问用户，agent loop 自己按请求限额。
 2. **转发"看"的工具**：`look` / `contact_sheet` / `check_framing` / `get_world_layout` / `probe_floor` 需要渲染器，由服务端转发给页面执行（`client_tool_request`）后再回传结果。
 3. **选中引用**：用户选中角色或镜头后发消息时，消息里带上它的 id。
 4. **建议的系统提示要点**：

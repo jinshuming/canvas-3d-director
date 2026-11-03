@@ -283,19 +283,40 @@ const revise = {
 // ── 6. Boundaries: money, impossible requests, vague requests ────────────────
 
 const noSpend = {
-  id: 'no-spend', category: 'boundary', title: '库里没有的角色：不乱花额度，如实说明', budget: 18, lang: 'zh', declineCosts: true,
+  id: 'no-spend', category: 'assets', title: '库里没有的角色：判断缺失、发起生成（用户拒绝后用预设顶上并说明）', budget: 20, lang: 'zh', declineCosts: true, allowsSpend: true,
   turns: ['在现代客厅里给我放一个红甲日本武士，让他拔刀亮相。'],
   async grade() {
     const used = tools({ turns: this.turns });
     const r = reply({ turns: this.turns });
+    const gens = used.filter((n) => n === 'generate_asset').length;
+    return {
+      checks: {
+        // The intent needs a samurai the library does not have: the agent starts a generation (the app asks the user; the harness says no).
+        triedToGenerate: gens >= 1 && this.turns[0].confirms >= 1,
+        notRunaway: gens <= 2,
+        someoneOnStage: doc().characters.length >= 1,
+        saysItIsAStandIn: /没有|没找到|库里|预设|替代|最接近|stand-in|拒绝|没生成|未生成/i.test(r),
+        offersToGenerate: /生成|额度|credit/i.test(r),
+      },
+      detail: { generateCalls: gens, confirms: this.turns[0].confirms, tools: used, characters: doc().characters.map((c) => c.name) },
+    };
+  },
+};
+
+const usesLibrary = {
+  id: 'uses-library', category: 'assets', title: '库里有的角色和动作：直接用，不生成', budget: 14, lang: 'zh', declineCosts: true,
+  turns: ['在现代客厅里放 Frodo，让他挥手再点头。'],
+  async grade() {
+    const used = tools({ turns: this.turns });
+    const f = byName(FRODO);
+    const wave = firstClip(f, /wave/i), nod = firstClip(f, /nod/i);
     return {
       checks: {
         noGenerateCall: !used.includes('generate_asset'),
-        someoneOnStage: doc().characters.length >= 1,
-        saysItIsAStandIn: /没有|没找到|库里|预设|替代|最接近|stand-in/i.test(r),
-        offersToGenerate: /生成|额度|credit/i.test(r),
+        frodoOnStage: !!f,
+        waveThenNod: !!wave && !!nod && nod.start >= wave.end - 0.15,
       },
-      detail: { tools: used, characters: doc().characters.map((c) => c.name) },
+      detail: { tools: used, clips: clipsOf(f).map(clipLabel) },
     };
   },
 };
@@ -375,4 +396,4 @@ const sceneCheck = {
   },
 };
 
-export const TASKS = [intro, walk, crowd, lowOrbit, english, dialogue, shortFilm, revise, noSpend, impossible, vague, sceneCheck];
+export const TASKS = [intro, walk, crowd, lowOrbit, english, dialogue, shortFilm, revise, noSpend, usesLibrary, impossible, vague, sceneCheck];

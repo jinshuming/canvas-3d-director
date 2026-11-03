@@ -10,7 +10,7 @@ import type { ChatItem, TurnStats } from './useAgent.ts';
 /** How each tool reads in the transcript. */
 const TOOL_LABEL: Record<string, string> = {
   get_stage: '查看片场', get_world_layout: '查看地面布局', look: '观察画面', check_framing: '检查构图', contact_sheet: '生成联系表', probe_floor: '探测地面',
-  list_assets: '浏览素材', generate_asset: '生成素材', check_jobs: '查看生成进度', set_scene: '设置场景', set_timeline: '设置时间轴',
+  list_assets: '浏览素材', generate_asset: '生成素材', check_jobs: '查看生成进度', wait_for_jobs: '等待生成完成', find_scene_gaps: '检测场景瑕疵', fill_scene_view: '补全场景视角', set_scene: '设置场景', set_timeline: '设置时间轴',
   add_character: '添加角色', update_character: '调整角色', remove_character: '移除角色', set_motion_sequence: '编排动作', add_motion: '添加动作',
   edit_motion_clip: '调整动作片段', move_character: '设计走位', clear_moves: '清除走位', add_shot: '新建镜头', frame_shot: '架设机位',
   camera_move: '设计运镜', set_camera_keys: '设置相机关键帧', edit_shot: '调整镜头', preview: '预览给你看', undo: '撤销', export_shot: '导出镜头',

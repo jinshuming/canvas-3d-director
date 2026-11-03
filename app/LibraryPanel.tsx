@@ -177,8 +177,9 @@ function GenerateForm({ tab, onSubmit }: { tab: Tab; onSubmit: (kind: Tab, input
     if (tab === 'scene') input = { prompt: text, quality };
     else if (tab === 'motion') input = { text, duration, name };
     else {
-      if (!image) { setBusy(false); return; }
-      input = { name: name || image.name.replace(/\.\w+$/, ''), imageBase64: await toBase64(image), mimeType: image.type };
+      if (!image && !text.trim()) { setBusy(false); return; }
+      // A description alone makes the character; with a picture it steers how the picture is enhanced.
+      input = { name: name || image?.name.replace(/\.\w+$/, '') || '', prompt: text.trim() || undefined, ...(image ? { imageBase64: await toBase64(image), mimeType: image.type } : {}) };
     }
     const ok = await onSubmit(tab, input);
     setBusy(false);
@@ -200,12 +201,13 @@ function GenerateForm({ tab, onSubmit }: { tab: Tab; onSubmit: (kind: Tab, input
       )}
       {tab === 'character' && (
         <>
+          <textarea rows={3} placeholder="描述角色，例如：身披红色铠甲的日本武士，腰间佩刀，站立，全身" value={text} onChange={(e) => setText(e.target.value)} maxLength={1000} />
           <input type="file" accept="image/png,image/jpeg,image/webp" onChange={(e) => setImage(e.target.files?.[0] ?? null)} />
           <div className="gen-row">
             <input placeholder="名字（可选）" value={name} onChange={(e) => setName(e.target.value)} />
-            <button className="pill primary" disabled={busy || !image} onClick={go}>生成角色 · {COSTS.character} 额度</button>
+            <button className="pill primary" disabled={busy || (!image && !text.trim())} onClick={go}>生成角色 · {COSTS.character} 额度</button>
           </div>
-          <p className="muted small">全身正面照效果最好，生成约 1–2 分钟。</p>
+          <p className="muted small">只写描述、只传图片、或两者都给（描述用来引导这张图）。全身正面效果最好，生成约 1–2 分钟。</p>
         </>
       )}
       {tab === 'motion' && (
