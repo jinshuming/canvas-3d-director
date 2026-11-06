@@ -127,6 +127,9 @@ export function readWorld(raw: unknown): WorldFile {
   };
 }
 
+/** What a tool step reads when the page went away while it was running. */
+export const INTERRUPTED = '（这一步没做完：页面刷新或关闭时它还在运行）';
+
 /** A chat as stored: no pictures (they are large and the model has seen them), no half-finished lines. */
 export function storableChat(chat: WorldChat): WorldChat {
   return {
@@ -134,7 +137,9 @@ export function storableChat(chat: WorldChat): WorldChat {
     items: chat.items
       .filter((x) => x.kind !== 'confirm' || x.answer !== undefined)
       .map((x) => {
-        if (x.kind === 'tool') return { ...x, image: undefined, status: x.status === 'running' ? 'error' as const : x.status };
+        // A step still running when this is stored will never finish (the loop lives in the page): say so.
+        if (x.kind === 'tool' && x.status === 'running') return { ...x, image: undefined, status: 'error' as const, result: x.result || INTERRUPTED };
+        if (x.kind === 'tool') return { ...x, image: undefined };
         if (x.kind === 'assistant') return { ...x, streaming: undefined };
         return x;
       }),

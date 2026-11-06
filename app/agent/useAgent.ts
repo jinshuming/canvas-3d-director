@@ -6,7 +6,7 @@ import { runStageTool, STAGE_TOOLS } from '@stage';
 import { api } from '../api.ts';
 import { fillCredits } from '../shared/library.ts';
 import type { ChatItem, WorldChat } from '../shared/world.ts';
-import { storableChat } from '../shared/world.ts';
+import { INTERRUPTED, storableChat } from '../shared/world.ts';
 
 export type { ChatItem } from '../shared/world.ts';
 
@@ -59,6 +59,11 @@ export function useAgent(worldId: string, initial: WorldChat, host: StageToolHos
   const [busy, setBusy] = useState(false);
   const [lastTurn, setLastTurn] = useState<TurnStats | null>(null);
   const previousId = useRef<string | null>(start.previousResponseId);
+  // The last response of a request that FINISHED. What is stored, and what a cut-off request falls back to:
+  // the response in the middle of a request may be waiting on a tool result the page will never send.
+  const settledId = useRef<string | null>(start.previousResponseId);
+  // The page went away mid-request: the model has to be told, once, that its last step never returned.
+  const interrupted = useRef(start.items.some((x) => x.kind === 'tool' && x.result === INTERRUPTED));
   const abort = useRef<AbortController | null>(null);
   const confirms = useRef(new Map<string, (ok: boolean) => void>());
 
@@ -72,7 +77,7 @@ export function useAgent(worldId: string, initial: WorldChat, host: StageToolHos
     if (text === saved.current) return;
     saved.current = text;
     // Pictures stay in the page: they are large, and the model has already seen them.
-    void api.saveChat(worldId, storableChat({ previousResponseId: previousId.current, items: itemsRef.current, updatedAt: null })).catch(() => { saved.current = ''; });
+    void api.saveChat(worldId, storableChat({ previousResponseId: settledId.current, items: itemsRef.current, updatedAt: null })).catch(() => { saved.current = ''; });
   }, [worldId]);
   useEffect(() => {
     const t = setTimeout(persist, busy ? 2500 : 400);
@@ -106,14 +111,18 @@ export function useAgent(worldId: string, initial: WorldChat, host: StageToolHos
     push({ kind: 'user', id: uid(), text: t });
     const stats: TurnStats = { steps: 0, toolCalls: 0, toolErrors: 0, tools: [], ms: 0, inputTokens: 0, outputTokens: 0 };
     const t0 = performance.now();
-    let input: unknown[] = [{ role: 'user', content: [{ type: 'input_text', text: `${context()}\n\n${t}` }] }];
+    const note = interrupted.current
+      ? '[System] Your previous request was cut off when the page reloaded: its last tool call never returned. Look at the stage (get_stage, and check_jobs for generations) before you carry on with the user\'s message.\n\n'
+      : '';
+    interrupted.current = false;
+    let input: unknown[] = [{ role: 'user', content: [{ type: 'input_text', text: `${context()}\n\n${note}${t}` }] }];
     try {
       for (let step = 0; step < MAX_STEPS; step++) {
         stats.steps++;
         const replyId = uid();
         let replyStarted = false;
         const last = step === MAX_STEPS - 1;
-        const response = await withRetry(ctl.signal, () => {
+        const oneTurn = () => {
           // A retried turn starts its reply over: drop what the failed attempt streamed.
           if (replyStarted) { replyStarted = false; setItems((xs) => xs.filter((x) => x.id !== replyId)); }
           return streamTurn(input, previousId.current, ctl.signal, last, (delta) => {
@@ -121,13 +130,22 @@ export function useAgent(worldId: string, initial: WorldChat, host: StageToolHos
               setItems((xs) => xs.map((x) => (x.id === replyId && x.kind === 'assistant' ? { ...x, text: x.text + delta } : x)));
             }
           });
+        };
+        const response = await withRetry(ctl.signal, async () => {
+          try { return await oneTurn(); } catch (e) {
+            // A stored chain that ends in a call nobody answered is refused by the API: start from this message alone.
+            if (!/No tool output found/i.test(e instanceof Error ? e.message : '') || previousId.current === null) throw e;
+            previousId.current = null;
+            settledId.current = null;
+            return oneTurn();
+          }
         });
         if (replyStarted) patch(replyId, { streaming: false });
         previousId.current = response.id;
         stats.inputTokens += response.usage?.input_tokens ?? 0;
         stats.outputTokens += response.usage?.output_tokens ?? 0;
         const calls = (response.output ?? []).filter((o): o is FunctionCall => o.type === 'function_call');
-        if (!calls.length) break;
+        if (!calls.length) { settledId.current = response.id; break; }
         const outputs: unknown[] = [];
         for (const call of calls) {
           if (ctl.signal.aborted) throw new DOMException('Stopped', 'AbortError');
@@ -178,8 +196,8 @@ export function useAgent(worldId: string, initial: WorldChat, host: StageToolHos
     } catch (e) {
       if ((e as Error).name === 'AbortError') push({ kind: 'error', id: uid(), text: '已停止。' });
       else push({ kind: 'error', id: uid(), text: e instanceof Error ? e.message : String(e) });
-      // A turn cut off mid tool-call cannot be continued from: start the next one fresh.
-      previousId.current = null;
+      // A turn cut off mid tool-call cannot be continued from: the next one starts from the last request that finished.
+      previousId.current = settledId.current;
     } finally {
       stats.ms = Math.round(performance.now() - t0);
       setLastTurn(stats);
@@ -195,6 +213,7 @@ export function useAgent(worldId: string, initial: WorldChat, host: StageToolHos
   const reset = useCallback(() => {
     abort.current?.abort();
     previousId.current = null;
+    settledId.current = null;
     setItems([]);
     setLastTurn(null);
   }, []);
