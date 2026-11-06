@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import type { CameraSample, StageAspect, StageRenderer, StageView } from '@stage';
-import { ASPECTS, nextFreeStart, runStageTool, STAGE_TOOLS } from '@stage';
+import type { CameraSample, StageDoc, StageRenderer, StageView } from '@stage';
+import { ASPECTS, editSpan, nextFreeStart, runStageTool, shotSpan, STAGE_TOOLS } from '@stage';
 
 import { api } from './api.ts';
 import { createDirectorHost } from './agentHost.ts';
@@ -10,12 +10,16 @@ import type { ExportProgress } from './exporter.ts';
 import { download, exportEditVideo, exportFrame, exportShotVideo } from './exporter.ts';
 import { Icon, Logo } from './icons.tsx';
 import { ExpandPanel } from './ExpandPanel.tsx';
+import { ExportDialog } from './ExportDialog.tsx';
+import type { H3Options } from './ExportDialog.tsx';
+import { LightingPanel } from './LightingPanel.tsx';
 import { Inspector } from './Inspector.tsx';
 import type { LibraryTab } from './LibraryPanel.tsx';
 import { LibraryPanel } from './LibraryPanel.tsx';
 import type { Selection } from './ops.ts';
 import { addClip, addShot, clamp, uid, upsertKey } from './ops.ts';
-import type { LibraryCharacter, LibraryMotion, LibraryScene } from './shared/library.ts';
+import type { GenJob, LibraryCharacter, LibraryMotion, LibraryScene } from './shared/library.ts';
+import { H3_ASPECT, H3_MAX_SECONDS, h3Duration } from './shared/library.ts';
 import { Timeline } from './Timeline.tsx';
 import { linkProps } from './router.ts';
 import type { WorldChat } from './shared/world.ts';
@@ -64,13 +68,24 @@ function StudioEditor({ stageId, nodeId, live, agentModel, initialChat, fresh, c
   const [history, setHistory] = useState(false);
   // Expanding the scene: find its gaps and fill them. Shares the left side with the library.
   const [expand, setExpand] = useState(false);
+  // The world's light, in the same left-hand slot.
+  const [lightOpen, setLightOpen] = useState(false);
+  // The export's choices (frame shape, frame rate) are asked for here, when exporting.
+  const [exportOpen, setExportOpen] = useState(false);
+  // The H3 render of this world, if one has been asked for: it runs on the server for minutes.
+  const [h3Job, setH3Job] = useState<GenJob | null>(null);
+  const refreshH3 = useCallback(() => api.library().then((lib) => setH3Job(lib.jobs.find((j) => j.kind === 'h3' && j.worldId === stageId) ?? null)).catch(() => {}), [stageId]);
+  useEffect(() => { void refreshH3(); }, [refreshH3]);
+  useEffect(() => {
+    if (h3Job?.status !== 'processing') return;
+    const t = setInterval(() => void refreshH3(), 5000);
+    return () => clearInterval(t);
+  }, [h3Job?.status, refreshH3]);
 
   // The active shot: the one picked, else the first.
   const shot = doc?.shots.find((s) => s.id === activeShot) ?? doc?.shots[0] ?? null;
   useEffect(() => { if (shot && shot.id !== activeShot) setActiveShot(shot.id); }, [shot, activeShot]);
   const hasEdit = !!doc?.cuts?.length;
-  // The edit going away (its last cut deleted) leaves the viewport on the active shot.
-  useEffect(() => { if (view.kind === 'edit' && !hasEdit) setView(shot ? { kind: 'shot', shotId: shot.id } : { kind: 'free' }); }, [view.kind, hasEdit, shot]);
 
   // Playback: the clock runs on wall time and wraps at the end.
   const timeRef = useRef(time);
@@ -155,16 +170,39 @@ function StudioEditor({ stageId, nodeId, live, agentModel, initialChat, fresh, c
   };
 
   // ── Export ───────────────────────────────────────────────────────────────
-  const runExport = async (kind: 'png' | 'mp4' | 'edit', shotId = shot?.id, at = time): Promise<string> => {
+  /** Hand the previs video to H3 as its reference, with what to make of it. */
+  const sendToH3 = async (previs: Blob, d: StageDoc, h3: H3Options): Promise<string> => {
+    const span = (d.cuts?.length ? editSpan(d) : (() => { const s = d.shots.find((x) => x.id === shot?.id); return s ? shotSpan(s) : null; })()) ?? [0, 5];
+    const form = new FormData();
+    form.set('reference_video', previs, 'previs.mp4');
+    form.set('prompt', h3.prompt);
+    form.set('quality', h3.quality);
+    form.set('resolution', h3.resolution);
+    form.set('enhance', String(h3.enhance));
+    form.set('duration_s', String(h3Duration(span[1] - span[0])));
+    form.set('aspect_ratio', H3_ASPECT[d.aspect] ?? '16:9');
+    form.set('world', stageId);
+    form.set('title', `${d.title} · H3`);
+    setExporting((e) => (e ? { ...e, label: '上传给 H3', progress: null } : e));
+    await api.submitH3(form);
+    await refreshH3();
+    say('已交给 H3 渲染，完成后点工具栏的「下载 H3 成片」');
+    return 'Sent the previs video to H3 for rendering; the user downloads the result from the toolbar when it is ready.';
+  };
+
+  const runExport = async (kind: 'png' | 'mp4' | 'edit', shotId = shot?.id, at = time, opts: { h3?: H3Options } = {}): Promise<string> => {
     const d = store.get();
     const target = d?.shots.find((s) => s.id === shotId);
     if (!renderer || !d || (kind !== 'edit' && !target)) { say('先建一个镜头'); return 'No shot to export.'; }
     setPlaying(false);
     const abort = new AbortController();
-    setExporting({ label: kind === 'png' ? '导出画面' : kind === 'edit' ? '渲染成片' : '渲染视频', progress: null, abort });
+    setExporting({ label: opts.h3 ? '渲染预演视频，交给 H3' : kind === 'png' ? '导出画面' : kind === 'edit' ? '渲染成片' : '渲染视频', progress: null, abort });
     try {
+      // H3 takes at most 15 seconds, so the previs it is given stops there.
+      const cap = opts.h3 ? H3_MAX_SECONDS : Infinity;
       if (kind === 'edit') {
-        const blob = await exportEditVideo(renderer, d, (progress) => setExporting((e) => (e ? { ...e, progress } : e)), abort.signal);
+        const blob = await exportEditVideo(renderer, d, (progress) => setExporting((e) => (e ? { ...e, progress } : e)), abort.signal, cap);
+        if (opts.h3) return await sendToH3(blob, d, opts.h3);
         download(blob, `${slug(d.title)}-成片.mp4`);
         say('已导出成片');
         return 'Exported the edit as mp4; it downloaded for the user.';
@@ -174,7 +212,8 @@ function StudioEditor({ stageId, nodeId, live, agentModel, initialChat, fresh, c
         const blob = await exportFrame(renderer, d, target.id, at);
         download(blob, `${slug(d.title)}-${slug(target.name)}-${at.toFixed(2)}s.png`);
       } else {
-        const blob = await exportShotVideo(renderer, d, target.id, (progress) => setExporting((e) => (e ? { ...e, progress } : e)), abort.signal);
+        const blob = await exportShotVideo(renderer, d, target.id, (progress) => setExporting((e) => (e ? { ...e, progress } : e)), abort.signal, cap);
+        if (opts.h3) return await sendToH3(blob, d, opts.h3);
         download(blob, `${slug(d.title)}-${slug(target.name)}.mp4`);
       }
       say('已导出');
@@ -199,7 +238,8 @@ function StudioEditor({ stageId, nodeId, live, agentModel, initialChat, fresh, c
     renderer: () => rendererRef.current,
     ui: {
       preview: ({ shotId, edit, time: t, play }) => {
-        if (edit) setView({ kind: 'edit' });
+        // The preview already follows the edit where it has a cut: asking for the edit is asking for the preview.
+        if (edit) { const first = store.get()?.shots[0]; if (first) setView({ kind: 'shot', shotId: first.id }); }
         else if (shotId) { setActiveShot(shotId); setView({ kind: 'shot', shotId }); } else if (shotId === null) setView({ kind: 'free' });
         if (typeof t === 'number') setTime(t);
         setPlaying(Boolean(play));
@@ -226,7 +266,7 @@ function StudioEditor({ stageId, nodeId, live, agentModel, initialChat, fresh, c
     const d = store.get();
     const s = c.selection;
     const sel = s?.kind === 'character' ? `${d?.characters.find((k) => k.id === s.id)?.name ?? s.id} (${s.id})` : s ? JSON.stringify(s) : 'nothing';
-    return `[Editor] playhead ${c.time.toFixed(2)}s; selected: ${sel}; active shot: ${c.shot ?? 'none'}; viewport: ${c.view.kind === 'shot' ? 'through the active shot' : c.view.kind === 'edit' ? 'through the edit' : 'free camera'}.`;
+    return `[Editor] playhead ${c.time.toFixed(2)}s; selected: ${sel}; active shot: ${c.shot ?? 'none'}; viewport: ${c.view.kind === 'shot' || c.view.kind === 'edit' ? 'the preview (the shot cut in at the playhead when the edit has one, else the active shot)' : 'free camera'}.`;
   }, [store]);
   const agent = useAgent(stageId, initialChat, host, editorContext);
   useEffect(() => { if (import.meta.env.DEV) (window as unknown as { __agentLast?: unknown }).__agentLast = agent.lastTurn; }, [agent.lastTurn]);
@@ -280,7 +320,7 @@ function StudioEditor({ stageId, nodeId, live, agentModel, initialChat, fresh, c
   if (store.error) return <div className="center error">无法打开片场：{store.error} <a {...linkProps('/canvas')}>返回画布</a></div>;
   if (!doc) return <div className="center muted">加载片场…</div>;
 
-  const openLibrary = (t: LibraryTab) => { setExpand(false); setLibrary((cur) => (cur === t ? null : t)); };
+  const openLibrary = (t: LibraryTab) => { setExpand(false); setLightOpen(false); setLibrary((cur) => (cur === t ? null : t)); };
   const flyTo = (cam: CameraSample) => {
     setPlaying(false);
     setView({ kind: 'free' });
@@ -312,24 +352,15 @@ function StudioEditor({ stageId, nodeId, live, agentModel, initialChat, fresh, c
           <div className="float pill-group top-right">
             <button className="pill icon" disabled={!store.canUndo} onClick={store.undo} title="撤销 ⌘Z"><Icon name="undo" /></button>
             <button className="pill icon" disabled={!store.canRedo} onClick={store.redo} title="重做 ⇧⌘Z"><Icon name="redo" /></button>
-            <label className="pill select-pill" title="画幅">
-              <Icon name="film" />
-              <select value={doc.aspect} onChange={(e) => update((d) => ({ ...d, aspect: e.target.value as StageAspect }))}>
-                {Object.keys(ASPECTS).map((a) => <option key={a}>{a}</option>)}
-              </select>
-            </label>
-            <label className="pill select-pill" title="帧率">
-              <select value={doc.fps} onChange={(e) => update((d) => ({ ...d, fps: Number(e.target.value) }))}>
-                {[24, 25, 30].map((f) => <option key={f} value={f}>{f} fps</option>)}
-              </select>
-            </label>
-            <button className="pill" disabled={!shot || !!exporting} onClick={() => void runExport('png')}><Icon name="image" />导出当前帧</button>
-            {hasEdit
-              ? <>
-                  <button className="pill" disabled={!shot || !!exporting} onClick={() => void runExport('mp4')} title="只导出当前镜头"><Icon name="download" />导出镜头</button>
-                  <button className="pill primary" disabled={!!exporting} onClick={() => void runExport('edit')} title="按剪辑轨导出整条成片"><Icon name="film" />导出成片</button>
-                </>
-              : <button className="pill primary" disabled={!shot || !!exporting} onClick={() => void runExport('mp4')}><Icon name="download" />导出镜头视频</button>}
+            {h3Job && (
+              <span className={`pill h3-chip ${h3Job.status}`} title={h3Job.status === 'failed' ? h3Job.error ?? 'H3 渲染失败' : `${h3Job.label} · ${h3Job.credits} 额度`}>
+                {h3Job.status === 'processing' && <>H3 渲染中…</>}
+                {h3Job.status === 'ready' && h3Job.videoUrl && <a href={h3Job.videoUrl} download={`${slug(doc.title)}-H3.mp4`}><Icon name="download" size={14} />下载 H3 成片</a>}
+                {h3Job.status === 'failed' && <>H3 渲染失败</>}
+                {h3Job.status !== 'processing' && <button className="link" onClick={() => void api.dismissJob(h3Job.id).then(refreshH3)} title="清除">×</button>}
+              </span>
+            )}
+            <button className="pill primary" disabled={!shot || !!exporting} onClick={() => setExportOpen(true)} title={hasEdit ? '按剪辑轨导出整条成片' : '导出当前镜头的视频'}><Icon name="film" />导出成片</button>
           </div>
 
           {!doc.scene && !doc.characters.length && (
@@ -342,7 +373,7 @@ function StudioEditor({ stageId, nodeId, live, agentModel, initialChat, fresh, c
 
           {/* Left rail */}
           <nav className="float rail">
-            <button className={`rail-btn plus ${library ? 'open' : ''}`} onClick={() => { setExpand(false); setLibrary((l) => (l ? null : 'scene')); }} title="素材库">
+            <button className={`rail-btn plus ${library ? 'open' : ''}`} onClick={() => { setExpand(false); setLightOpen(false); setLibrary((l) => (l ? null : 'scene')); }} title="素材库">
               <Icon name={library ? 'x' : 'plus'} size={20} />
             </button>
             <button className={`rail-btn ${library === 'scene' ? 'on' : ''}`} onClick={() => openLibrary('scene')} title="场景"><Icon name="scene" size={20} /></button>
@@ -351,9 +382,23 @@ function StudioEditor({ stageId, nodeId, live, agentModel, initialChat, fresh, c
               <Icon name="motion" size={20} />{selectedCharacter && <span className="badge" />}
             </button>
             <span className="rail-sep" />
-            <button className={`rail-btn ${expand ? 'on' : ''}`} disabled={!doc.scene} onClick={() => { setLibrary(null); setExpand((e) => !e); }} title="扩展场景：检测缺口，补全视角"><Icon name="expand" size={20} /></button>
             <button className={`rail-btn ${selection?.kind === 'shot' ? 'on' : ''}`} disabled={!shot} onClick={() => shot && setSelection({ kind: 'shot', shotId: shot.id })} title="镜头设置"><Icon name="settings" size={20} /></button>
           </nav>
+
+          {exportOpen && (
+            <ExportDialog aspect={doc.aspect} fps={doc.fps} title={doc.title}
+              seconds={(() => { const sp = hasEdit ? editSpan(doc) : shot ? shotSpan(shot) : null; return sp ? sp[1] - sp[0] : 0; })()}
+              what={hasEdit ? `把 ${doc.cuts?.length ?? 0} 段剪辑导出成一个 MP4。` : `还没有剪辑：导出当前镜头「${shot?.name ?? ''}」的视频。`}
+              onCancel={() => setExportOpen(false)}
+              onExport={({ aspect, fps, h3 }) => {
+                // The choices belong to the world (the viewport frame follows them), so they are kept.
+                update((d) => (d.aspect === aspect && d.fps === fps ? d : { ...d, aspect, fps }));
+                setExportOpen(false);
+                void runExport(hasEdit ? 'edit' : 'mp4', undefined, undefined, h3 ? { h3 } : {});
+              }} />
+          )}
+
+          {lightOpen && <LightingPanel doc={doc} update={update} onClose={() => setLightOpen(false)} />}
 
           {expand && (
             <ExpandPanel doc={doc} renderer={renderer} onClose={() => setExpand(false)} onFly={flyTo} onUseScene={useScene} />
@@ -368,8 +413,7 @@ function StudioEditor({ stageId, nodeId, live, agentModel, initialChat, fresh, c
           <div className="float pill-group shot-dock">
             <div className="seg">
               <button className={view.kind === 'free' ? 'on' : ''} onClick={() => setView({ kind: 'free' })}><Icon name="move" size={16} />自由相机</button>
-              <button className={view.kind === 'shot' ? 'on' : ''} disabled={!shot} onClick={() => shot && setView({ kind: 'shot', shotId: shot.id })}><Icon name="camera" size={16} />镜头视角</button>
-              <button className={view.kind === 'edit' ? 'on' : ''} disabled={!hasEdit} onClick={() => setView({ kind: 'edit' })} title={hasEdit ? '按剪辑轨播放：每段时间切到对应镜头' : '在时间轴的「剪辑」轨上切入镜头后可用'}><Icon name="film" size={16} />剪辑</button>
+              <button className={view.kind === 'shot' ? 'on' : ''} disabled={!shot} onClick={() => shot && setView({ kind: 'shot', shotId: shot.id })} title={hasEdit ? '预览：播放头在哪个切点内，就用那个镜头；不在任何切点内，用选中的镜头' : '透过选中的镜头看'}><Icon name="camera" size={16} />镜头视角</button>
             </div>
             <label className="pill select-pill">
               <select value={shot?.id ?? ''} onChange={(e) => { setActiveShot(e.target.value); if (view.kind === 'shot') setView({ kind: 'shot', shotId: e.target.value }); }} disabled={!doc.shots.length}>
@@ -378,6 +422,8 @@ function StudioEditor({ stageId, nodeId, live, agentModel, initialChat, fresh, c
               <Icon name="chevronDown" size={14} />
             </label>
             <button className="pill" onClick={() => { const made = addShot(doc); update(() => made.doc); setActiveShot(made.shot.id); setSelection({ kind: 'shot', shotId: made.shot.id }); }}><Icon name="plus" size={16} />新镜头</button>
+            <button className={`pill ${expand ? 'on' : ''}`} disabled={!doc.scene} onClick={() => { setLibrary(null); setLightOpen(false); setExpand((e) => !e); }} title="扩展场景：检测缺口，补全视角"><Icon name="expand" size={16} />扩展场景</button>
+            <button className={`pill ${lightOpen ? 'on' : ''}`} disabled={!doc.scene} onClick={() => { setLibrary(null); setExpand(false); setLightOpen((o) => !o); }} title="光影：给场景加太阳光和影子"><Icon name="bulb" size={16} />光影</button>
             <button className="pill primary" onClick={addKey} disabled={view.kind !== 'free'} title="把自由相机当前的机位记成播放头时刻的关键帧 (K)"><Icon name="key" size={14} />关键帧 <kbd>K</kbd></button>
           </div>
 
@@ -411,7 +457,6 @@ function StudioEditor({ stageId, nodeId, live, agentModel, initialChat, fresh, c
               <Icon name="history" size={20} />
               <h2>历史 World</h2>
               <div className="spacer" />
-              <a className="pill sm" {...linkProps('/canvas/world')}>全部 World</a>
               <button className="pill sm icon" onClick={() => setHistory(false)} title="关闭"><Icon name="x" size={16} /></button>
             </header>
             <WorldBrowser currentId={stageId} nodeId={nodeId} onClose={() => setHistory(false)} />

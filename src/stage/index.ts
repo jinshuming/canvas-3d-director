@@ -1,6 +1,6 @@
 export * from './types.js';
 export { ease, sampleShot, shotPath, shotSpan, sortedKeys } from './camera.js';
-export { cutAt, cutTo, editCamera, editSpan, moveCutEnd, normalizeCuts, patchCut, removeCut, setSequence, sortedCuts } from './cuts.js';
+export { cutAt, cutTo, cutWithin, editCamera, editSpan, moveCutEnd, normalizeCuts, patchCut, removeCut, setSequence, sortedCuts } from './cuts.js';
 export type { CameraSample } from './camera.js';
 export { nextFreeStart, overlapping, sampleTrack, trackTravel } from './clips.js';
 export type { ClipSample } from './clips.js';
@@ -17,3 +17,5 @@ export { captureOf, fillBlock, fillPoseToFile, poseOfCamera, sceneVersion } from
 export type { FillPose } from './scenefill.js';
 export { checkScene, measureFrame } from './scenecheck.js';
 export type { GapView, SceneCheck } from './scenecheck.js';
+export { DEFAULT_LIGHTING, LIGHT_PRESET_LABEL, LIGHT_PRESET_NAMES, LIGHT_PRESETS, normalizeLighting, presetByName } from './lighting.js';
+export type { LightPresetName } from './lighting.js';

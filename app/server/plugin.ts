@@ -2,12 +2,14 @@ import { randomUUID } from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
 import { copyFile, cp, mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { Readable } from 'node:stream';
 import { extname, join, normalize } from 'node:path';
 import type { Plugin } from 'vite';
 
 import type { StageDoc } from '../../src/stage/types.ts';
 import { AGENT_INSTRUCTIONS } from '../shared/agentPrompt.ts';
 import type { GenJob, Library, LibraryCharacter, LibraryMotion, LibraryScene } from '../shared/library.ts';
+import { H3_ASPECT, H3_MAX_SECONDS, H3_MIN_SECONDS, H3_RESOLUTIONS, h3Credits } from '../shared/library.ts';
 import type { WorldChat, WorldFile } from '../shared/world.ts';
 import { copyWorld, newWorld, readWorld, storableChat, summarize, WORLD_ID, worldFromStage } from '../shared/world.ts';
 
@@ -82,6 +84,45 @@ export function directorServer(opts: DirectorServerOptions): Plugin {
       throw httpError(res.status, err.message ?? `Viggle ${res.status}`, err.code);
     }
     return body;
+  }
+
+  /**
+   * An H3 render: the previs video the browser made goes to Viggle's MiniMax H3 as the reference video, with
+   * a prompt, and comes back as a finished video. `form` is the browser's multipart: `reference_video` (the
+   * mp4) and the options. Credits are Viggle's per-second price for the mode (library.ts).
+   */
+  async function submitH3(form: FormData): Promise<GenJob> {
+    const video = form.get('reference_video');
+    if (!(video instanceof Blob) || video.size === 0) throw httpError(400, 'Send the previs video as reference_video.');
+    if (video.size > 100 * 1024 * 1024) throw httpError(413, 'The previs video is over Viggle\'s 100 MiB limit for a reference video.');
+    const prompt = String(form.get('prompt') ?? '').trim();
+    if (!prompt) throw httpError(400, 'Describe the video H3 should make.');
+    const resolution = String(form.get('resolution') ?? '768p');
+    if (!(H3_RESOLUTIONS as readonly string[]).includes(resolution)) throw httpError(400, `resolution must be one of ${H3_RESOLUTIONS.join(', ')}.`);
+    const quality = String(form.get('quality') ?? 'high');
+    if (quality !== 'low' && quality !== 'high') throw httpError(400, 'quality must be low or high.');
+    const duration = Math.ceil(Number(form.get('duration_s') ?? H3_MIN_SECONDS));
+    if (!(duration >= H3_MIN_SECONDS && duration <= H3_MAX_SECONDS)) throw httpError(400, `duration_s must be ${H3_MIN_SECONDS}-${H3_MAX_SECONDS} seconds.`);
+    const aspect = String(form.get('aspect_ratio') ?? '16:9');
+    if (!Object.values(H3_ASPECT).includes(aspect)) throw httpError(400, 'Unsupported aspect_ratio.');
+    const enhance = String(form.get('enhance') ?? 'false') === 'true';
+    const out = new FormData();
+    out.set('prompt', prompt.slice(0, 2000));
+    out.set('quality', quality);
+    out.set('resolution', resolution);
+    out.set('aspect_ratio', aspect);
+    out.set('duration_s', String(duration));
+    out.set('enhance', String(enhance));
+    out.set('reference_video', video, 'previs.mp4');
+    const created = await viggle('/v1/videos', { method: 'POST', body: out });
+    const job: GenJob = {
+      id: `job_${randomUUID().slice(0, 12)}`, kind: 'h3', remoteId: String(created.id), label: String(form.get('title') ?? 'H3 成片').slice(0, 60),
+      status: 'processing', credits: h3Credits(duration, resolution as typeof H3_RESOLUTIONS[number], enhance), error: null, assetId: null,
+      worldId: String(form.get('world') ?? '') || undefined, createdAt: new Date().toISOString(),
+    };
+    library.jobs.unshift(job);
+    await saveLibrary();
+    return job;
   }
 
   async function download(url: string, name: string): Promise<string> {
@@ -189,6 +230,13 @@ export function directorServer(opts: DirectorServerOptions): Plugin {
         done(job, id);
       } else if (job.kind === 'fill') {
         await pollFill(job);
+      } else if (job.kind === 'h3') {
+        const v = await viggle(`/v1/videos/${encodeURIComponent(job.remoteId)}`);
+        if (v.status === 'failed' || v.status === 'cancelled') return fail(job, (v.error as { message?: string } | null)?.message ?? 'H3 render failed');
+        if (v.status !== 'ready' || !v.video_url) return;
+        job.videoUrl = await download(String(v.video_url), `h3_${job.id.slice(4)}.mp4`);
+        job.status = 'ready';
+        void saveLibrary();
       } else if (job.kind === 'character') {
         const c = await viggle(`/v1/characters/${encodeURIComponent(job.remoteId)}`);
         if (c.status === 'failed' || c.status === 'cancelled') return fail(job, (c.error as { message?: string })?.message ?? 'Character failed');
@@ -475,6 +523,11 @@ export function directorServer(opts: DirectorServerOptions): Plugin {
     }
 
     if (p === '/api/library' && m === 'GET') return json(res, library);
+    if (p === '/api/h3' && m === 'POST') {
+      // Multipart, parsed by the platform: the previs video can be tens of megabytes.
+      const form = await new Request('http://local/', { method: 'POST', headers: req.headers as Record<string, string>, body: Readable.toWeb(req) as ReadableStream, duplex: 'half' } as RequestInit).formData();
+      return json(res, await submitH3(form));
+    }
     const gen = /^\/api\/gen\/(scene|character|motion|fill)$/.exec(p);
     if (gen && m === 'POST') return json(res, await submit(gen[1] as GenJob['kind'], await readJson(req) as Record<string, unknown>));
     const dismiss = /^\/api\/jobs\/([^/]+)$/.exec(p);

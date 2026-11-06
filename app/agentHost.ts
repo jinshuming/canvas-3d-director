@@ -35,15 +35,16 @@ export function createDirectorHost(o: {
       },
       async generate(kind: AssetKind, input: Record<string, unknown>): Promise<GenerationJob> {
         const j = await api.generate(kind, input);
-        return { id: j.id, kind: j.kind, status: j.status, label: j.label, credits: j.credits, assetId: j.assetId, error: j.error };
+        return { id: j.id, kind, status: j.status, label: j.label, credits: j.credits, assetId: j.assetId, error: j.error };
       },
       async fillView(input): Promise<GenerationJob> {
         const j = await api.generate('fill', input);
-        return { id: j.id, kind: j.kind, status: j.status, label: j.label, credits: j.credits, assetId: j.assetId, error: j.error };
+        return { id: j.id, kind: 'fill' as const, status: j.status, label: j.label, credits: j.credits, assetId: j.assetId, error: j.error };
       },
       async jobs(): Promise<GenerationJob[]> {
         const lib = await api.library();
-        return lib.jobs.map((j) => ({ id: j.id, kind: j.kind, status: j.status, label: j.label, credits: j.credits, assetId: j.assetId, error: j.error }));
+        // H3 renders belong to the export, not to what the agent makes.
+        return lib.jobs.flatMap((j) => (j.kind === 'h3' ? [] : [{ id: j.id, kind: j.kind, status: j.status, label: j.label, credits: j.credits, assetId: j.assetId, error: j.error }]));
       },
     },
     ui: o.ui,

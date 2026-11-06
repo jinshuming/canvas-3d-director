@@ -43,8 +43,11 @@ export interface FillState {
 
 export interface GenJob {
   id: string;
-  kind: 'scene' | 'character' | 'motion' | 'fill';
+  kind: 'scene' | 'character' | 'motion' | 'fill' | 'h3';
   fill?: FillState;
+  /** H3 render: the World it was made from, and the finished video once it is downloaded (`/files/...`). */
+  worldId?: string;
+  videoUrl?: string;
   /** The Viggle task / character / motion id. */
   remoteId: string;
   label: string;
@@ -113,3 +116,31 @@ export function fillCredits(batches: number): number {
   const views = 6 + Math.max(0, batches - 1);
   return 1 + views + 1;
 }
+
+// ── H3: the previs video, rendered by Viggle's MiniMax H3 video model ─────────
+
+export const H3_RESOLUTIONS = ['480p', '768p', '1080p', '2k', '4k'] as const;
+export type H3Resolution = (typeof H3_RESOLUTIONS)[number];
+
+/** Credits per 5 seconds in reference-video mode (Viggle's prices), with the prompt-rewrite pass on and off. */
+const H3_PER_5S: Record<'on' | 'off', Record<H3Resolution, number>> = {
+  on: { '480p': 35, '768p': 45, '1080p': 50, '2k': 55, '4k': 75 },
+  off: { '480p': 15, '768p': 25, '1080p': 30, '2k': 35, '4k': 55 },
+};
+
+/** H3 makes 5 to 15 seconds in one go. */
+export const H3_MIN_SECONDS = 5;
+export const H3_MAX_SECONDS = 15;
+
+/** The length H3 is asked for, for a previs video this long: whole seconds, within what it can make. */
+export function h3Duration(previsSeconds: number): number {
+  return Math.min(H3_MAX_SECONDS, Math.max(H3_MIN_SECONDS, Math.ceil(previsSeconds - 1e-6)));
+}
+
+/** Credits for an H3 render: per started second, at the rate for its resolution. */
+export function h3Credits(durationS: number, resolution: H3Resolution, enhance: boolean): number {
+  return Math.ceil(durationS) * (H3_PER_5S[enhance ? 'on' : 'off'][resolution] / 5);
+}
+
+/** The frame shapes H3 takes; the stage's 2.39:1 is its 21:9. */
+export const H3_ASPECT: Record<string, string> = { '16:9': '16:9', '9:16': '9:16', '1:1': '1:1', '4:3': '4:3', '2.39:1': '21:9' };

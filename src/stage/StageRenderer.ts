@@ -1,4 +1,4 @@
-import { Animation, Character, Environment, FlyControls, Scene } from '@viggle/splat-engine';
+import { Animation, Character, Environment, FlyControls, Scene, SplatRelight } from '@viggle/splat-engine';
 
 import { probeFacing, probeRootTravel } from '../engine/probes.js';
 import type { FloorIndex } from '../walk/floorIndex.js';
@@ -6,13 +6,16 @@ import { buildFloorIndex } from '../walk/floorIndex.js';
 import { isUprightFile, placementFromGround, placeWalkScene } from '../walk/placement.js';
 import type { CameraSample } from './camera.js';
 import { sampleShot, shotPath, sortedKeys } from './camera.js';
-import { editCamera } from './cuts.js';
+import { cutWithin, editCamera } from './cuts.js';
 import { sampleTrack, trackTravel } from './clips.js';
 import { sampleMoves } from './moves.js';
-import type { StageCharacter, StageDoc, StagePlacement, StageShot, Vec3Tuple } from './types.js';
+import type { StageCharacter, StageDoc, StageLighting, StagePlacement, StageShot, Vec3Tuple } from './types.js';
 
 /** What the viewport shows: the free editing camera, a shot's camera, or a fixed camera (an agent looking somewhere). */
-/** What the viewport looks through: the free camera, one shot, the edit (whichever shot is cut in at the time), or a fixed camera. */
+/** Metres from the capture point the scene is relit (and receives shadows) out to: as far as a panorama is reconstructed well. */
+const RELIGHT_REACH = 6;
+
+/** What the viewport looks through: the free camera, the preview (the shot cut in at the playhead, else the picked shot), or a fixed camera. `edit` is the film alone and is no longer offered in the editor. */
 export type StageView = { kind: 'free' } | { kind: 'shot'; shotId: string } | { kind: 'edit' } | { kind: 'camera'; camera: CameraSample };
 
 export interface StageRendererEvents {
@@ -84,6 +87,11 @@ export class StageRenderer {
   private readonly livePositions = new Map<string, Vec3Tuple>();
   private readonly loadingClips = new Set<string>();
   private readonly errors: string[] = [];
+  /** The relighting component: made when the doc first has a light, then only switched and tuned. */
+  private relight: SplatRelight | null = null;
+  /** What has been handed to `relight` (a target is added once; the component drops one whose entity goes). */
+  private readonly relit = new WeakSet<object>();
+  private lighting: StageLighting | null = null;
 
   /** Overlay drawing: which character to ring, which shot's path to draw. */
   private selectedCharacter: string | null = null;
@@ -127,6 +135,7 @@ export class StageRenderer {
     this.doc = doc;
     this.syncScene(doc);
     this.syncCharacters(doc);
+    this.syncLighting(doc.lighting ?? null);
     for (const c of doc.characters) for (const clip of c.clips) void this.ensureClip(clip.url);
     void this.ensureClip(DEFAULT_IDLE_CLIP);
   }
@@ -316,6 +325,8 @@ export class StageRenderer {
     this.destroyed = true;
     this.scene.app.off('update', this.tick);
     this.fly.detach();
+    this.relight?.destroy();
+    this.relight = null;
     for (const l of this.characters.values()) l.character?.destroy();
     this.characters.clear();
     this.env?.destroy();
@@ -358,6 +369,7 @@ export class StageRenderer {
           this.mount(env, placement);
         }
         this.sceneLoading = false;
+        this.attachRelightTargets();
         this.emitState();
         this.events.onSceneLoaded?.(placement, measured);
       })
@@ -375,6 +387,67 @@ export class StageRenderer {
     env.entity.setPosition(p.x, p.y, p.z);
     env.entity.setEulerAngles(r.x, r.y, r.z);
     env.entity.setLocalScale(k, k, k);
+  }
+
+  /**
+   * The world's light. None: relighting is switched off and everything keeps the look it was captured
+   * with. Some: the key light, sky fill and strengths are set, and the scene and every character are
+   * handed to the relight component, so characters stand in the scene's light and cast shadows on it.
+   */
+  private syncLighting(l: StageLighting | null): void {
+    this.lighting = l;
+    if (!l) { if (this.relight) this.relight.enabled = false; return; }
+    if (!this.relight) {
+      try {
+        this.relight = SplatRelight.create(this.scene, {
+          strength: l.relight, shadowStrength: l.shadows, receiveShadows: true,
+          light: { azimuth: l.azimuth, elevation: l.elevation, intensity: l.intensity, color: l.color, castShadows: true },
+          sky: { color: '#ffffff', intensity: l.ambient },
+        });
+      } catch (e) {
+        // The device cannot render the half-float target relighting needs.
+        this.lighting = null;
+        this.errors.push(`光影：${message(e)}`);
+        this.emitState();
+        return;
+      }
+    }
+    const r = this.relight;
+    r.enabled = true;
+    r.strength = l.relight;
+    r.shadowStrength = l.shadows;
+    r.lightAzimuth = l.azimuth;
+    r.lightElevation = l.elevation;
+    r.lightIntensity = l.intensity;
+    r.setLightColor(l.color);
+    r.skyIntensity = l.ambient;
+    this.attachRelightTargets();
+  }
+
+  /** Hand the scene and the characters that have loaded to the relight component, once each. */
+  private attachRelightTargets(): void {
+    const r = this.relight;
+    const l = this.lighting;
+    if (!r || !l) return;
+    const env = this.env;
+    if (env && !this.relit.has(env)) {
+      this.relit.add(env);
+      // The scene's baked light is real: it is never re-coloured (strength 0), only shadowed. A tint would
+      // fill the box below and stop at its edge, a coloured square on the ground.
+      // Its proxy is only the receiver for the characters' shadows, so it is cropped to where they can
+      // stand: a capture's splats reach far past that (sky, mountains, floaters), the voxel grid is one
+      // dense box over everything it is given, and an uncropped panorama came out at 1-2 m a voxel -
+      // a floor too coarse to put a shadow at anyone's feet. Metres, floor at y = 0.
+      r.add(env, { bounds: { min: { x: -RELIGHT_REACH, y: -0.4, z: -RELIGHT_REACH }, max: { x: RELIGHT_REACH, y: 4, z: RELIGHT_REACH } } })
+        .then(() => { if (this.env === env) r.setParams(env, { strength: 0 }); })
+        .catch((e: unknown) => { this.errors.push(`光影（场景）：${message(e)}`); this.emitState(); });
+    }
+    for (const live of this.characters.values()) {
+      const c = live.character;
+      if (!c || this.relit.has(c)) continue;
+      this.relit.add(c);
+      r.add(c).catch((e: unknown) => { this.errors.push(`光影（角色）：${message(e)}`); this.emitState(); });
+    }
   }
 
   private syncCharacters(doc: StageDoc): void {
@@ -398,6 +471,7 @@ export class StageRenderer {
           // On the scene's layer, so its splats sort with the scene's.
           character.setLayers([this.scene.envLayerId]);
           live.character = character;
+          this.attachRelightTargets();
           this.emitState();
         })
         .catch((e: unknown) => {
@@ -440,13 +514,19 @@ export class StageRenderer {
 
   // ── Per frame ──────────────────────────────────────────────────────────────
 
-  private readonly tick = (): void => {
+  private readonly tick = (dt = 0): void => {
+    // The free camera flies only when it is ticked: the controls turn WASD/QE into movement once a frame.
+    // (Looking round answers the mouse directly, which is why dragging worked without this.)
+    if (this.view.kind === 'free') this.fly.update(Math.min(dt, 0.1));
     const doc = this.doc;
     if (!doc) return;
     for (const c of doc.characters) this.pose(c);
     const view = this.view;
     if (view.kind === 'shot') {
-      const shot = doc.shots.find((s) => s.id === view.shotId);
+      // The shot view is the preview: where the edit has a cut under the playhead it shows that cut's
+      // shot (the film as it will be), anywhere else the shot that was picked.
+      const cut = cutWithin(doc, this.time);
+      const shot = doc.shots.find((s) => s.id === (cut?.shotId ?? view.shotId));
       const sample = shot ? sampleShot(shot, this.time) : null;
       if (sample) this.applyCamera(sample);
     } else if (view.kind === 'edit') {

@@ -339,3 +339,41 @@ kbd { font: 600 11px/1 ui-monospace, Menlo, monospace; padding: 2px 5px; border-
 .gap-row { display: flex; align-items: center; gap: 6px; }
 .gap-row .menu-row { flex: 1; min-width: 0; }
 .gap-row .pill { height: 34px; flex: none; }
+
+/* Light: presets as chips, then a knob (a labelled slider) for each part of the sun. */
+.light-card .lib-scroll { display: grid; gap: 10px; align-content: start; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip-btn { height: 32px; padding: 0 12px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--edge); color: var(--text); font-size: 13px; }
+.chip-btn:hover { border-color: var(--edge-strong); }
+.chip-btn.on { background: var(--surface-3); border-color: var(--edge-strong); color: #fff; }
+.light-knobs { gap: 12px; }
+.knob { display: grid; gap: 4px; }
+.knob-label { display: flex; justify-content: space-between; font-size: 13px; }
+.knob-label em { font-style: normal; color: var(--muted); font-variant-numeric: tabular-nums; }
+.knob input[type="range"] { width: 100%; }
+.knob input[type="color"] { width: 100%; height: 34px; padding: 2px; background: var(--surface-3); border: 1px solid var(--edge); border-radius: 10px; }
+
+/* A small centred dialog (the export's choices). */
+.modal { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; background: rgba(0, 0, 0, 0.5); backdrop-filter: blur(3px); }
+.modal-box { width: min(380px, 92vw); display: grid; gap: 14px; padding: 20px 22px 22px; background: var(--side); border: 1px solid var(--edge-strong); border-radius: 20px; box-shadow: var(--shadow); }
+.modal-head { display: flex; align-items: center; justify-content: space-between; }
+.modal-head h2 { margin: 0; font-size: 20px; }
+.modal-actions { justify-content: flex-end; }
+
+/* Export: the two ways out, and what H3 is asked for. */
+.modal-box { max-height: 92vh; overflow: auto; }
+.mode-pick { display: grid; gap: 8px; }
+.mode { display: grid; gap: 4px; text-align: left; padding: 10px 12px; background: var(--surface-2); border: 1px solid var(--edge); border-radius: 14px; color: var(--text); }
+.mode strong { font-size: 14px; font-weight: 600; }
+.mode span { font-size: 12.5px; color: var(--muted); }
+.mode:hover { border-color: var(--edge-strong); }
+.mode.on { border-color: var(--blue); background: var(--surface-3); }
+.h3-box { display: grid; gap: 10px; }
+.h3-box textarea { width: 100%; resize: vertical; }
+.h3-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.check { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.h3-chip { gap: 6px; font-size: 13px; }
+.h3-chip a { display: inline-flex; align-items: center; gap: 4px; color: inherit; text-decoration: none; }
+.h3-chip.failed { color: var(--danger); }
+.h3-chip.processing { color: var(--muted); }
+.h3-chip .link { background: none; border: 0; padding: 0 2px; color: var(--muted); }

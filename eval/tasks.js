@@ -396,4 +396,33 @@ const sceneCheck = {
   },
 };
 
-export const TASKS = [intro, walk, crowd, lowOrbit, english, dialogue, shortFilm, revise, noSpend, usesLibrary, impossible, vague, sceneCheck];
+// ── 8. Light: mood in the request becomes a light, with the face lit ────────
+
+const lighting = {
+  id: 'lighting', category: 'light', title: '黄昏氛围：打暖色低角度光，影子明显，脸不能黑', budget: 20, lang: 'zh',
+  turns: ['在现代客厅里放 Frodo，面向镜头站着，给一个全身镜头，要有黄昏的氛围，影子要明显。'],
+  async grade() {
+    const d = doc();
+    const f = byName(FRODO);
+    const l = d.lighting;
+    // Warm: more red than blue. Faces: the light is not behind the character (a camera in front sees azimuth ~180 as a silhouette).
+    const rgb = l ? [1, 3, 5].map((i) => parseInt(l.color.slice(i, i + 2), 16)) : [0, 0, 0];
+    const behind = l ? Math.abs(((l.azimuth - 180 + 540) % 360) - 180) < 50 : false;
+    const used = tools({ turns: this.turns });
+    const health = shotHealth();
+    return {
+      checks: {
+        frodoOnStage: !!f,
+        setALight: !!l && used.includes('set_lighting'),
+        low: !!l && l.elevation <= 25,
+        warm: !!l && rgb[0] > rgb[2] + 40,
+        shadowsShow: !!l && l.shadows >= 0.5,
+        faceNotInSilhouette: !!l && !behind,
+        shotFramesHim: clearAll(health) && headsIn(health),
+      },
+      detail: { lighting: l, tools: used },
+    };
+  },
+};
+
+export const TASKS = [intro, walk, crowd, lowOrbit, english, dialogue, shortFilm, revise, noSpend, usesLibrary, impossible, vague, sceneCheck, lighting];

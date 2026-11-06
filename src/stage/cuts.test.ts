@@ -57,3 +57,17 @@ test('dragging a boundary moves both sides of it; removing a cut leaves a hold',
   d = removeCut(d, d.cuts![1]!.id);
   assert.equal(cutAt(d, 4.95)?.shotId, 'wide', 'in the gap the film holds the cut before');
 });
+
+test('cutWithin is the cut the playhead is inside: no holding before, between or after', async () => {
+  const { cutWithin } = await import('./cuts.js');
+  const doc = { cuts: [{ id: 'a', shotId: 'A', start: 1, end: 3 }, { id: 'b', shotId: 'B', start: 3, end: 5 }, { id: 'c', shotId: 'C', start: 6, end: 8 }] };
+  assert.equal(cutWithin(doc, 0.5), null, 'before the first');
+  assert.equal(cutWithin(doc, 1)?.id, 'a');
+  assert.equal(cutWithin(doc, 2.99)?.id, 'a');
+  assert.equal(cutWithin(doc, 3)?.id, 'b', 'a boundary belongs to the cut that starts there');
+  assert.equal(cutWithin(doc, 5.5), null, 'in a gap');
+  assert.equal(cutWithin(doc, 7)?.id, 'c');
+  assert.equal(cutWithin(doc, 8)?.id, 'c', 'the last cut keeps its end frame');
+  assert.equal(cutWithin(doc, 8.5), null, 'after the last');
+  assert.equal(cutWithin({ cuts: [] }, 1), null);
+});
