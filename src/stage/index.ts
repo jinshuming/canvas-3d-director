@@ -13,3 +13,7 @@ export { ANGLES, cameraMoveKeys, framePair, frameSubject, lineSide, SHOT_SIZES, 
 export type { CameraMoveInput, CameraMoveKind, Figure, FramingInput, PairFraming, PairFramingInput, ShotAngle, ShotSide, ShotSize } from './framing.js';
 export { contactSheet, povCamera, renderStill, runStageTool, settle, STAGE_TOOLS, stageToolDefinitions, topDownCamera } from './tools/index.js';
 export type { AssetKind, AssetRef, AssetSource, GenerationJob, StageTool, StageToolHost, ToolResult } from './tools/index.js';
+export { captureOf, fillBlock, fillPoseToFile, poseOfCamera, sceneVersion } from './scenefill.js';
+export type { FillPose } from './scenefill.js';
+export { checkScene, measureFrame } from './scenecheck.js';
+export type { GapView, SceneCheck } from './scenecheck.js';

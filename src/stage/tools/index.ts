@@ -8,7 +8,8 @@ import { ANGLES, cameraMoveKeys, framePair, frameSubject, SHOT_SIZES, SIDES } fr
 import { moveLength, sampleMoves, yawToward } from '../moves.js';
 import type { GapView } from '../scenecheck.js';
 import { checkScene, measureFrame } from '../scenecheck.js';
-import { fileToWorldPoint, placeWalkScene, worldToFilePoint } from '../../walk/placement.js';
+import { fileToWorldPoint, placeWalkScene } from '../../walk/placement.js';
+import { fillBlock, fillPoseToFile, sceneVersion } from '../scenefill.js';
 import type { CameraKey, Easing, Interpolation, StageAspect, StageCharacter, StageClip, StageDoc, StageMove, StageShot, Vec3Tuple } from '../types.js';
 import { ASPECTS } from '../types.js';
 import type { AssetKind, AssetRef, GenerationJob, StageToolHost, ToolResult } from './host.js';
@@ -226,18 +227,6 @@ const PAIR_PROPS = {
 
 /** The last scene check a host ran, so `fill_scene_view` can take one of its ids. */
 const lastCheck = new WeakMap<StageToolHost, { url: string; version: number; views: GapView[] }>();
-
-/** How many image batches the scene holds: it changes every time a fill lands, which is what retires an id. */
-const sceneVersion = (doc: StageDoc) => doc.scene?.viggle?.batchIds.length ?? 0;
-
-/** Why this scene cannot be filled, or null when it can. A check works on any scene; a fill needs the Viggle session. */
-function fillBlock(doc: StageDoc): string | null {
-  if (!doc.scene) return 'No scene yet: set_scene first.';
-  if (!doc.scene.viggle?.sessionId) return 'This scene cannot be filled: only a scene generated here keeps its Viggle session (a preset or imported file has none). Keep people and cameras away from the gaps, or generate a new scene.';
-  if (!doc.scene.placement) return 'The scene is not measured yet: call get_world_layout, then try again.';
-  if (!doc.scene.placement.upright) return 'This scene file is stored in a frame fills cannot be aimed in (only .spz scenes can be filled).';
-  return null;
-}
 
 const pct = (v: number) => `${Math.round(v * 1000) / 10}%`;
 
@@ -577,13 +566,8 @@ export const STAGE_TOOLS: StageTool[] = [
       const { pose } = await planFill(i, host);
       if (!host.assets.fillView) return fail('Filling is not set up here (no API key on the server).');
       // The editor's frame -> the scene file's: the camera is stood where the file's own units say.
-      const mount = placeWalkScene(doc.scene!.placement!);
-      const job = await host.assets.fillView({
-        sceneUrl: doc.scene!.url,
-        position: worldToFilePoint(mount, pose.position),
-        yaw: pose.yaw - mount.rotation.y,
-        pitch: pose.pitch,
-      });
+      const file = fillPoseToFile(doc, pose);
+      const job = await host.assets.fillView({ sceneUrl: doc.scene!.url, position: file.position, yaw: file.yaw, pitch: file.pitch });
       return ok({
         job_id: job.id, status: job.status, credits: job.credits,
         note: 'Started: takes one to three minutes. Poll check_jobs; when it is ready call set_scene with its asset id (the scene changes under you, so people and shots stay as they are), then find_scene_gaps again. Say what you filled and what it cost.',
