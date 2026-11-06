@@ -89,3 +89,17 @@ test('a summary says what is in a world and what was last asked', () => {
   s = summarize(w, cover);
   assert.equal(s.coverUrl, '/c/wld_x');
 });
+
+test('a tool step still running when the chat is stored is marked as cut off, with a message', async () => {
+  const { INTERRUPTED, storableChat } = await import('./world.ts');
+  const stored = storableChat({
+    previousResponseId: 'resp_1', updatedAt: null,
+    items: [
+      { kind: 'tool', id: 'a', name: 'wait_for_jobs', args: '{}', status: 'running' },
+      { kind: 'tool', id: 'b', name: 'get_stage', args: '{}', status: 'done', result: 'ok', image: 'data:x' },
+    ],
+  });
+  assert.equal(stored.items[0]!.kind === 'tool' && stored.items[0]!.status, 'error');
+  assert.equal(stored.items[0]!.kind === 'tool' && stored.items[0]!.result, INTERRUPTED);
+  assert.equal(stored.items[1]!.kind === 'tool' && stored.items[1]!.image, undefined);
+});
