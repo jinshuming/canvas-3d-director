@@ -334,3 +334,27 @@ test('generate_asset is prechecked before the user is asked, and wait_for_jobs w
   Object.assign(host.assets, { jobs: async () => [job('ready')] });
   assert.equal(json(await runStageTool('wait_for_jobs', {}, host)).waiting, 0);
 });
+
+test('set_lighting starts from a preset, adjusts it, and can switch the light off', async () => {
+  const host = fakeHost();
+  const r = json(await runStageTool('set_lighting', { preset: '黄昏' }, host));
+  assert.equal(host.doc.lighting?.preset, 'dusk');
+  assert.equal(r.lighting.name, '黄昏');
+  // An adjustment lands on the light the world has, and makes it a custom one.
+  json(await runStageTool('set_lighting', { elevation: 30, shadows: 0.4 }, host));
+  assert.equal(host.doc.lighting?.preset, undefined);
+  assert.equal(host.doc.lighting?.elevation, 30);
+  assert.equal(host.doc.lighting?.azimuth, 315, 'the rest stays as dusk had it');
+  // Out of range is clamped, not refused; an unknown preset is refused.
+  json(await runStageTool('set_lighting', { intensity: 99, azimuth: -45 }, host));
+  assert.equal(host.doc.lighting?.intensity, 5);
+  assert.equal(host.doc.lighting?.azimuth, 315);
+  assert.equal((await runStageTool('set_lighting', { preset: 'sunrise' }, host)).is_error, true);
+  // Nothing set yet: adjusting starts from the default light.
+  const fresh = fakeHost();
+  json(await runStageTool('set_lighting', { intensity: 1.5 }, fresh));
+  assert.equal(fresh.doc.lighting?.intensity, 1.5);
+  json(await runStageTool('set_lighting', { preset: 'off' }, host));
+  assert.equal(host.doc.lighting, null);
+  assert.equal(json(await runStageTool('get_stage', {}, host)).lighting, 'off');
+});

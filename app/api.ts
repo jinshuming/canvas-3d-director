@@ -10,7 +10,9 @@ export class ApiError extends Error {
 }
 
 async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(path, { ...init, headers: { 'Content-Type': 'application/json', ...init.headers } });
+  // A FormData body sets its own multipart Content-Type (with the boundary).
+  const json: Record<string, string> = init.body instanceof FormData ? {} : { 'Content-Type': 'application/json' };
+  const res = await fetch(path, { ...init, headers: { ...json, ...init.headers } });
   const text = await res.text();
   const body = text ? JSON.parse(text) as unknown : null;
   if (!res.ok) {
@@ -35,5 +37,7 @@ export const api = {
   saveCover: (id: string, dataUrl: string) => call<{ coverUrl: string }>(`/api/worlds/${id}/cover`, { method: 'PUT', body: JSON.stringify({ dataUrl }) }),
   library: () => call<Library>('/api/library'),
   generate: (kind: GenJob['kind'], input: Record<string, unknown>) => call<GenJob>(`/api/gen/${kind}`, { method: 'POST', body: JSON.stringify(input) }),
+  /** An H3 render: `form` carries the previs video as `reference_video`, and the options. */
+  submitH3: (form: FormData) => call<GenJob>('/api/h3', { method: 'POST', body: form }),
   dismissJob: (id: string) => call<{ ok: true }>(`/api/jobs/${id}`, { method: 'DELETE' }),
 };

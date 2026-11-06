@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 
 import type { StageAssetState, StageDoc, StageView } from '@stage';
-import { ASPECTS, StageRenderer } from '@stage';
+import { ASPECTS, cutWithin, StageRenderer } from '@stage';
 
 import type { Selection } from './ops.ts';
 import { patchCharacter } from './ops.ts';
@@ -134,6 +134,12 @@ export function Viewport({ doc, time, view, selection, activeShot, update, onSel
   };
 
   const frame = view.kind === 'shot' || view.kind === 'edit' ? ASPECTS[doc.aspect] : null;
+  // The preview shows the shot cut in at the playhead; say so when that is not the shot that was picked.
+  const live = view.kind === 'shot' ? cutWithin(doc, time) : null;
+  const liveShot = live ? doc.shots.find((s) => s.id === live.shotId) : null;
+  const previewHint = liveShot && liveShot.id !== activeShot
+    ? `镜头视角（只读）· 现在是剪辑里的「${liveShot.name}」，不是选中的镜头 · 切回自由相机可编辑`
+    : '镜头视角（只读）· 切回自由相机可编辑';
   const loading = assets && (assets.sceneLoading || assets.loadingCharacters.length > 0 || assets.loadingClips.length > 0);
 
   return (
@@ -154,7 +160,7 @@ export function Viewport({ doc, time, view, selection, activeShot, update, onSel
         {assets?.errors.slice(-2).map((e, i) => <span key={i} className="chip error">{e}</span>)}
       </div>
       <div className="viewport-hint">
-        {view.kind === 'free' ? '拖动转视角 · WASD/QE 移动 · 滚轮推拉 · 拖角色移动 · Shift+拖角色旋转' : view.kind === 'edit' ? '剪辑视角（只读）· 按剪辑轨切换镜头' : '镜头视角（只读）· 切回自由相机可编辑'}
+        {view.kind === 'free' ? '拖动转视角 · WASD/QE 移动 · 滚轮推拉 · 拖角色移动 · Shift+拖角色旋转' : previewHint}
       </div>
     </div>
   );

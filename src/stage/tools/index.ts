@@ -9,6 +9,7 @@ import { moveLength, sampleMoves, yawToward } from '../moves.js';
 import type { GapView } from '../scenecheck.js';
 import { checkScene, measureFrame } from '../scenecheck.js';
 import { fileToWorldPoint, placeWalkScene } from '../../walk/placement.js';
+import { DEFAULT_LIGHTING, LIGHT_PRESET_LABEL, LIGHT_PRESET_NAMES, LIGHT_PRESETS, normalizeLighting, presetByName } from '../lighting.js';
 import { fillBlock, fillPoseToFile, sceneVersion } from '../scenefill.js';
 import type { CameraKey, Easing, Interpolation, StageAspect, StageCharacter, StageClip, StageDoc, StageMove, StageShot, Vec3Tuple } from '../types.js';
 import { ASPECTS } from '../types.js';
@@ -197,6 +198,7 @@ function describe(doc: StageDoc, host: StageToolHost, t?: number) {
       id: s.id, name: s.name, interpolation: s.interpolation, easing: s.easing, span: shotSpan(s),
       keys: sortedKeys(s.keys).map((k) => ({ id: k.id, t: k.t, position: v3(k.position), target: v3(k.target), fov: Math.round(k.fov) })),
     })),
+    lighting: doc.lighting ? { ...doc.lighting } : 'off',
     edit: sortedCuts(doc).map((c) => ({ shot: c.shotId, shot_name: doc.shots.find((s) => s.id === c.shotId)?.name, start: c.start, end: c.end })),
   };
 }
@@ -604,6 +606,40 @@ export const STAGE_TOOLS: StageTool[] = [
       }));
       const d = host.getDoc();
       return ok({ title: d.title, duration: d.duration, fps: d.fps, aspect: d.aspect });
+    },
+  },
+
+  {
+    name: 'set_lighting',
+    effect: 'edit',
+    description: `The light on the scene and the characters: a sun-like key light that makes the characters stand in the scene's light and cast shadows on it. Start from a \`preset\` (${LIGHT_PRESET_NAMES.join(', ')} - or "off" to remove the light and keep the look the scene was captured with), then adjust any of: \`azimuth\` (degrees, where the light comes FROM: 0 from +Z, i.e. over the shoulder of a camera at the capture point and onto the face of a character looking at it; 90 from +X, the right of that camera; 180 from -Z, behind the character: backlight, a silhouette; 270 from -X), \`elevation\` (0 horizon .. 90 overhead; low = long shadows), \`intensity\` (0..5), \`color\` (CSS hex; warm for morning and dusk, blue for night), \`ambient\` (sky fill 0..2: raise it if faces go too dark), \`shadows\` (0..1 how dark; 0 casts none), \`relight\` (0..1 how far the light replaces the characters' own look); the scene keeps its own light and only receives the characters' shadows. Mood from the request picks the preset: golden hour or sunset = dusk, dawn = morning, moonlit or night = night, grey or flat = overcast. Check it with \`look\`: a character who is a black silhouette needs the light in front (azimuth near 0 to 60 or 300 to 360) or more ambient.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        preset: { type: 'string', enum: [...LIGHT_PRESET_NAMES, 'off'] },
+        azimuth: NUM, elevation: NUM, intensity: NUM, color: { type: 'string', description: 'CSS hex, e.g. #ffd9a8.' },
+        ambient: NUM, shadows: NUM, relight: NUM,
+      },
+    },
+    async run(i, host) {
+      if (i.preset === 'off') {
+        host.update((d) => ({ ...d, lighting: null }));
+        return ok({ lighting: 'off', note: 'The scene and characters keep the look they were captured with.' });
+      }
+      const doc = host.getDoc();
+      const named = i.preset !== undefined && i.preset !== '' ? presetByName(i.preset) : null;
+      if (i.preset !== undefined && i.preset !== '' && !named) throw new ToolError(`Unknown preset "${i.preset}": use ${LIGHT_PRESET_NAMES.join(', ')} or off.`);
+      // A preset starts afresh; adjustments land on it, or on the light the world already has.
+      const base = named ? LIGHT_PRESETS[named] : doc.lighting ?? DEFAULT_LIGHTING;
+      const light = normalizeLighting({
+        azimuth: i.azimuth, elevation: i.elevation, intensity: i.intensity, color: i.color, ambient: i.ambient, shadows: i.shadows, relight: i.relight,
+        ...(named && [i.azimuth, i.elevation, i.intensity, i.color, i.ambient, i.shadows, i.relight].every((v) => v === undefined) ? { preset: named } : {}),
+      }, base);
+      host.update((d) => ({ ...d, lighting: light }));
+      return ok({
+        lighting: { ...(light.preset ? { preset: light.preset, name: LIGHT_PRESET_LABEL[light.preset as keyof typeof LIGHT_PRESET_LABEL] } : {}), azimuth: Math.round(light.azimuth), elevation: Math.round(light.elevation), intensity: r2(light.intensity), color: light.color, ambient: r2(light.ambient), shadows: r2(light.shadows), relight: r2(light.relight) },
+        note: 'Look at a shot to judge it. The first frame with a new light can take a second to settle.',
+      });
     },
   },
 

@@ -37,6 +37,17 @@ export function cutAt(doc: Pick<StageDoc, 'cuts'>, t: number): StageCut | null {
   return live;
 }
 
+/**
+ * The cut the playhead is INSIDE, or null: unlike `cutAt` it does not hold on a cut before the first,
+ * between two or after the last. A cut owns [start, end), and the last one also its end frame.
+ */
+export function cutWithin(doc: Pick<StageDoc, 'cuts'>, t: number): StageCut | null {
+  const cuts = sortedCuts(doc);
+  for (const c of cuts) if (c.start - EPS <= t && t < c.end - EPS) return c;
+  const last = cuts[cuts.length - 1];
+  return last && Math.abs(t - last.end) <= EPS ? last : null;
+}
+
 /** The film's camera at `t`: the live shot's camera then. */
 export function editCamera(doc: Pick<StageDoc, 'cuts' | 'shots'>, t: number): CameraSample | null {
   const cut = cutAt(doc, t);

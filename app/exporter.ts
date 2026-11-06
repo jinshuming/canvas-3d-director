@@ -26,18 +26,18 @@ export async function exportFrame(r: StageRenderer, doc: StageDoc, shotId: strin
 }
 
 /** Render one shot over its keys' span. */
-export async function exportShotVideo(r: StageRenderer, doc: StageDoc, shotId: string, onProgress: (p: ExportProgress) => void, signal: AbortSignal): Promise<Blob> {
+export async function exportShotVideo(r: StageRenderer, doc: StageDoc, shotId: string, onProgress: (p: ExportProgress) => void, signal: AbortSignal, maxSeconds = Infinity): Promise<Blob> {
   const shot = doc.shots.find((s) => s.id === shotId);
   const span = shot ? shotSpan(shot) : null;
   if (!shot || !span || span[1] <= span[0]) throw new Error('这个镜头至少需要两个不同时间的关键帧。');
-  return exportVideo(r, doc, { kind: 'shot', shotId }, span, onProgress, signal);
+  return exportVideo(r, doc, { kind: 'shot', shotId }, [span[0], Math.min(span[1], span[0] + maxSeconds)], onProgress, signal);
 }
 
 /** Render the edit: the film, each stretch through the shot cut in there. */
-export async function exportEditVideo(r: StageRenderer, doc: StageDoc, onProgress: (p: ExportProgress) => void, signal: AbortSignal): Promise<Blob> {
+export async function exportEditVideo(r: StageRenderer, doc: StageDoc, onProgress: (p: ExportProgress) => void, signal: AbortSignal, maxSeconds = Infinity): Promise<Blob> {
   const span = editSpan(doc);
   if (!span || span[1] <= span[0]) throw new Error('还没有剪辑：先在时间轴的「剪辑」轨上切入镜头。');
-  return exportVideo(r, doc, { kind: 'edit' }, span, onProgress, signal);
+  return exportVideo(r, doc, { kind: 'edit' }, [span[0], Math.min(span[1], span[0] + maxSeconds)], onProgress, signal);
 }
 
 /**

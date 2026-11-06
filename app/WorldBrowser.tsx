@@ -46,7 +46,6 @@ export function WorldBrowser({ currentId, nodeId, onClose }: { currentId?: strin
     <div className="wb">
       <div className="wb-head">
         <div className="wb-search"><Icon name="search" size={16} /><input placeholder="搜索标题、场景或对话" value={query} onChange={(e) => setQuery(e.target.value)} /></div>
-        {nodeId && <span className="muted small">选中的 World 会加载到当前画布节点</span>}
       </div>
       {error && <p className="error">{error}</p>}
       {!worlds && !error && <p className="muted">加载中…</p>}

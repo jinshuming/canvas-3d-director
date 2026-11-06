@@ -142,7 +142,35 @@ export interface StageDoc {
   shots: StageShot[];
   /** The edit: which shot the film shows when, sorted, without overlaps. Absent or empty: no edit yet. */
   cuts?: StageCut[];
+  /** The light on the scene and its characters; absent keeps the look they were captured with. See lighting.ts. */
+  lighting?: StageLighting | null;
   updatedAt: string;
+}
+
+/** A sun-like key light, a sky fill, and how far they relight the scene and the characters. */
+export interface StageLighting {
+  /** Which preset this started from, while it is still exactly that. */
+  preset?: string;
+  /** Degrees, where the light comes FROM: 0 from +Z, 90 from +X, 180 from -Z, 270 from -X. */
+  azimuth: number;
+  /** Degrees above the horizon, 0..90. */
+  elevation: number;
+  /** 0..5; 1 is a neutral key light. */
+  intensity: number;
+  /** CSS hex. */
+  color: string;
+  /** Sky fill, 0..2. */
+  ambient: number;
+  /** How dark cast shadows are, 0..1; 0 casts none. */
+  shadows: number;
+  /** 0..1: how far the light replaces the characters' own look. */
+  relight: number;
+  /**
+   * No longer used: the scene always keeps its own light and only receives the characters' shadows. A
+   * light re-colours the scene only inside the box its shadow receiver is cut to (a few metres round the
+   * capture point), which shows as a coloured square with straight edges. Old worlds may still carry one.
+   */
+  sceneRelight?: number;
 }
 
 export const ASPECTS: Record<StageAspect, number> = {
