@@ -333,3 +333,9 @@ kbd { font: 600 11px/1 ui-monospace, Menlo, monospace; padding: 2px 5px; border-
 .seg.sm button { height: 26px; padding: 0 10px; font-size: 12.5px; border-radius: 8px; }
 .seg.wide.sm { margin: 0; }
 .btn .icon, .btn svg { flex: none; }
+
+/* Expand the scene: the gaps the check found, each a row that flies the camera there plus a fill button. */
+.expand-card .lib-scroll { display: grid; gap: 10px; align-content: start; }
+.gap-row { display: flex; align-items: center; gap: 6px; }
+.gap-row .menu-row { flex: 1; min-width: 0; }
+.gap-row .pill { height: 34px; flex: none; }

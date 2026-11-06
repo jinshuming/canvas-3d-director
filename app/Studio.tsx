@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import type { StageAspect, StageRenderer, StageView } from '@stage';
+import type { CameraSample, StageAspect, StageRenderer, StageView } from '@stage';
 import { ASPECTS, nextFreeStart, runStageTool, STAGE_TOOLS } from '@stage';
 
 import { api } from './api.ts';
@@ -9,6 +9,7 @@ import { createDirectorHost } from './agentHost.ts';
 import type { ExportProgress } from './exporter.ts';
 import { download, exportEditVideo, exportFrame, exportShotVideo } from './exporter.ts';
 import { Icon, Logo } from './icons.tsx';
+import { ExpandPanel } from './ExpandPanel.tsx';
 import { Inspector } from './Inspector.tsx';
 import type { LibraryTab } from './LibraryPanel.tsx';
 import { LibraryPanel } from './LibraryPanel.tsx';
@@ -61,6 +62,8 @@ function StudioEditor({ stageId, nodeId, live, agentModel, initialChat, fresh, c
   // A new world opens agent-first: the library stays shut until asked for.
   const [library, setLibrary] = useState<LibraryTab | null>(fresh ? null : 'scene');
   const [history, setHistory] = useState(false);
+  // Expanding the scene: find its gaps and fill them. Shares the left side with the library.
+  const [expand, setExpand] = useState(false);
 
   // The active shot: the one picked, else the first.
   const shot = doc?.shots.find((s) => s.id === activeShot) ?? doc?.shots[0] ?? null;
@@ -277,7 +280,13 @@ function StudioEditor({ stageId, nodeId, live, agentModel, initialChat, fresh, c
   if (store.error) return <div className="center error">无法打开片场：{store.error} <a {...linkProps('/canvas')}>返回画布</a></div>;
   if (!doc) return <div className="center muted">加载片场…</div>;
 
-  const openLibrary = (t: LibraryTab) => setLibrary((cur) => (cur === t ? null : t));
+  const openLibrary = (t: LibraryTab) => { setExpand(false); setLibrary((cur) => (cur === t ? null : t)); };
+  const flyTo = (cam: CameraSample) => {
+    setPlaying(false);
+    setView({ kind: 'free' });
+    // The viewport takes the free camera over on the next render: aim it after.
+    setTimeout(() => renderer?.setCamera(cam), 60);
+  };
 
   return (
     <div className="studio">
@@ -333,7 +342,7 @@ function StudioEditor({ stageId, nodeId, live, agentModel, initialChat, fresh, c
 
           {/* Left rail */}
           <nav className="float rail">
-            <button className={`rail-btn plus ${library ? 'open' : ''}`} onClick={() => setLibrary((l) => (l ? null : 'scene'))} title="素材库">
+            <button className={`rail-btn plus ${library ? 'open' : ''}`} onClick={() => { setExpand(false); setLibrary((l) => (l ? null : 'scene')); }} title="素材库">
               <Icon name={library ? 'x' : 'plus'} size={20} />
             </button>
             <button className={`rail-btn ${library === 'scene' ? 'on' : ''}`} onClick={() => openLibrary('scene')} title="场景"><Icon name="scene" size={20} /></button>
@@ -342,8 +351,13 @@ function StudioEditor({ stageId, nodeId, live, agentModel, initialChat, fresh, c
               <Icon name="motion" size={20} />{selectedCharacter && <span className="badge" />}
             </button>
             <span className="rail-sep" />
+            <button className={`rail-btn ${expand ? 'on' : ''}`} disabled={!doc.scene} onClick={() => { setLibrary(null); setExpand((e) => !e); }} title="扩展场景：检测缺口，补全视角"><Icon name="expand" size={20} /></button>
             <button className={`rail-btn ${selection?.kind === 'shot' ? 'on' : ''}`} disabled={!shot} onClick={() => shot && setSelection({ kind: 'shot', shotId: shot.id })} title="镜头设置"><Icon name="settings" size={20} /></button>
           </nav>
+
+          {expand && (
+            <ExpandPanel doc={doc} renderer={renderer} onClose={() => setExpand(false)} onFly={flyTo} onUseScene={useScene} />
+          )}
 
           {library && (
             <LibraryPanel tab={library} onTab={setLibrary} onClose={() => setLibrary(null)} live={live} selectedCharacter={selectedCharacter}
