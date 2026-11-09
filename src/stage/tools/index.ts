@@ -6,6 +6,7 @@ import { addClip, addMove, addShot, clamp, patchCharacter, patchShot, removeChar
 import type { CameraMoveKind, PairFraming, ShotAngle, ShotSide, ShotSize } from '../framing.js';
 import { ANGLES, cameraMoveKeys, framePair, frameSubject, SHOT_SIZES, SIDES } from '../framing.js';
 import { moveLength, sampleMoves, yawToward } from '../moves.js';
+import { NpcBodies, pushOutOfBodies } from '../bodies.js';
 import type { GapView } from '../scenecheck.js';
 import { checkScene, measureFrame } from '../scenecheck.js';
 import { fileToWorldPoint, placeWalkScene } from '../../walk/placement.js';
@@ -93,6 +94,57 @@ function onFloor(_host: StageToolHost, p: readonly number[]): Vec3Tuple {
   // centimetres up, so it only says whether there is floor (see the warnings), not how high.
   const [x, y, z] = p.length >= 3 ? [p[0]!, p[1]!, p[2]!] : [p[0]!, 0, p[1]!];
   return [r2(x), r2(y), r2(z)];
+}
+
+/**
+ * Where a person `height` tall asked to stand at (x, z) really stands, by the scene's collider: on the floor
+ * there (a street or a room with a step is a few centimetres off the stage's y = 0), moved out of furniture
+ * and walls, and out of the other people's footprints. PINOC's walk does the same for her spawn: the engine's
+ * push-out, the floor read from two steps up, and `pushOutOfBodies` for the people. With no collider yet: on
+ * y = 0, as before.
+ */
+function placePerson(host: StageToolHost, doc: StageDoc, x: number, z: number, height: number, except?: string): { position: Vec3Tuple; notes: string[] } {
+  const r = host.renderer;
+  const notes: string[] = [];
+  if (!r || !r.collider) return { position: [r2(x), 0, r2(z)], notes };
+  const wall = r.pushOutAt(x, z, 0, height);
+  if (wall) { x = wall.x; z = wall.z; notes.push(`stood inside furniture or a wall: moved to [${r2(x)}, ${r2(z)}]`); }
+  const bodies = new NpcBodies();
+  for (const o of doc.characters) if (o.id !== except) { const p = placeAt(host, o, 0).position; bodies.set(o.id, p[0], p[2], r.bodyRadius(o.height)); }
+  const apart = pushOutOfBodies(bodies, x, z, r.bodyRadius(height));
+  if (apart) {
+    const near = bodies.nearest(x, z)?.body.id;
+    x = apart.x; z = apart.z;
+    const who = doc.characters.find((o) => o.id === near)?.name;
+    notes.push(`overlapped ${who ?? 'another person'}: moved apart to [${r2(x)}, ${r2(z)}]`);
+  }
+  const y = r.standAt(x, z, height);
+  if (y === null) notes.push(`there is no room for a person at [${r2(x)}, ${r2(z)}] (a wall or furniture): check get_world_layout`);
+  else if (y > 0.5) notes.push(`this spot is ${r2(y)} m above the stage floor (a step or a platform)`);
+  return { position: [r2(x), y === null ? 0 : r2(y), r2(z)], notes };
+}
+
+/**
+ * The first place a walk `points` from `from` runs a person `height` tall into solid scene, or null. Sampled every
+ * 10 cm; a single sample is a voxel's rounding, two in a row are a wall. People cannot pass furniture, so a
+ * move through it is refused (PINOC's walk collides and slides; a planned path has to go round).
+ */
+function walkProblem(host: StageToolHost, from: Vec3Tuple, points: Vec3Tuple[], height: number): Vec3Tuple | null {
+  const r = host.renderer;
+  if (!r || !r.collider) return null;
+  let prev = from;
+  let run = 0;
+  for (const to of points) {
+    const len = Math.hypot(to[0] - prev[0], to[2] - prev[2]);
+    const n = Math.max(1, Math.ceil(len / 0.1));
+    for (let k = 1; k <= n; k++) {
+      const f = k / n;
+      const x = prev[0] + (to[0] - prev[0]) * f, z = prev[2] + (to[2] - prev[2]) * f, y = prev[1] + (to[1] - prev[1]) * f;
+      if (r.overlapAt(x, z, y, height) > 0) { if (++run >= 2) return [r2(x), r2(y), r2(z)]; } else run = 0;
+    }
+    prev = to;
+  }
+  return null;
 }
 
 /** Resolve a subject (a character, or a point) to a framing target at `t`. */
@@ -394,7 +446,9 @@ export const STAGE_TOOLS: StageTool[] = [
         const gap = sample && capture ? measureFrame(sample, { capture: [capture.x, capture.y, capture.z] }, cam.position, dir, cam.fov, ASPECTS[doc.aspect]) : null;
         // A camera with no floor under it has left the reconstruction: expect smears.
         const overFloor = r.floorAt(cam.position[0], cam.position[2], cam.position[1]) !== null;
-        return { t, camera_over_floor: overFloor, ...(gap ? { scene_gap: { hole: pct(gap.hole), blur: pct(gap.blur), ...(gap.hole + gap.blur > 0.25 ? { warning: 'much of this frame is hole or smear in the scene itself: aim away, or find_scene_gaps / fill it.' } : {}) } } : {}), characters: r.framing(cam, ASPECTS[doc.aspect], t).map(({ id: _id, inFront: _f, ...f }) => f) };
+        // PINOC's camera boom: the eye is a ball, and it may not be inside a wall.
+        const inWall = r.cameraInsideSolid(cam.position, Math.max(...doc.characters.map((k) => k.height), 1.7));
+        return { t, camera_over_floor: overFloor, ...(inWall ? { camera_in_wall: true, warning: 'the camera is inside a wall or furniture: move it out, it will show a smear.' } : {}), ...(gap ? { scene_gap: { hole: pct(gap.hole), blur: pct(gap.blur), ...(gap.hole + gap.blur > 0.25 ? { warning: 'much of this frame is hole or smear in the scene itself: aim away, or find_scene_gaps / fill it.' } : {}) } } : {}), characters: r.framing(cam, ASPECTS[doc.aspect], t).map(({ id: _id, inFront: _f, ...f }) => f) };
       }));
     },
   },
@@ -671,12 +725,16 @@ export const STAGE_TOOLS: StageTool[] = [
         const dist = i.distance ?? 1.5;
         position = onFloor(host, [ref.position[0] - Math.sin(a2) * dist, ref.position[2] - Math.cos(a2) * dist]);
       } else position = onFloor(host, [0, -2.5]);
+      const height = clamp(i.height ?? 1.7, 0.3, 4);
+      // On the scene's floor, out of its furniture and out of the other people.
+      const placed = placePerson(host, doc, position[0], position[2], height);
+      position = placed.position;
       const yaw = faceYaw(host, doc, position, i.face, i.yaw ?? 180);
       const id = uid('chr');
       const name = String(i.name || a.name);
-      host.update((d) => ({ ...d, characters: [...d.characters, { id, name, url: a.url, position, yaw, height: clamp(i.height ?? 1.7, 0.3, 4), clips: [] }] }));
-      const floorWarn = host.renderer && host.renderer.floorAt(position[0], position[2]) === null ? ' Warning: no floor found under that point - check with get_world_layout.' : '';
-      return ok({ character_id: id, name, position, yaw: Math.round(yaw), note: `Loaded on stage.${floorWarn}` });
+      host.update((d) => ({ ...d, characters: [...d.characters, { id, name, url: a.url, position, yaw, height, clips: [] }] }));
+      const floorWarn = host.renderer && !host.renderer.collider && host.renderer.floorAt(position[0], position[2]) === null ? ' Warning: no floor found under that point - check with get_world_layout.' : '';
+      return ok({ character_id: id, name, position, yaw: Math.round(yaw), note: `Loaded on stage.${floorWarn}${placed.notes.length ? ` Moved: ${placed.notes.join('; ')}.` : ''}` });
     },
   },
   {
@@ -687,13 +745,19 @@ export const STAGE_TOOLS: StageTool[] = [
     async run(i, host) {
       const doc = host.getDoc();
       const c = findCharacter(doc, i.character);
-      const position = Array.isArray(i.position) ? onFloor(host, i.position) : c.position;
+      let position = Array.isArray(i.position) ? onFloor(host, i.position) : c.position;
       const patch: Partial<StageCharacter> = { position };
       if (i.name) patch.name = String(i.name);
       if (typeof i.height === 'number') patch.height = clamp(i.height, 0.3, 4);
+      let notes: string[] = [];
+      if (Array.isArray(i.position) || typeof i.height === 'number') {
+        const placed = placePerson(host, doc, position[0], position[2], patch.height ?? c.height, c.id);
+        position = patch.position = placed.position;
+        notes = placed.notes;
+      }
       if (typeof i.yaw === 'number' || i.face !== undefined) patch.yaw = faceYaw(host, doc, position, i.face, i.yaw ?? c.yaw);
       host.update((d) => patchCharacter(d, c.id, patch));
-      return ok({ character_id: c.id, position: patch.position, yaw: Math.round(patch.yaw ?? c.yaw) });
+      return ok({ character_id: c.id, position: patch.position, yaw: Math.round(patch.yaw ?? c.yaw), ...(notes.length ? { moved: notes } : {}) });
     },
   },
   {
@@ -810,6 +874,22 @@ export const STAGE_TOOLS: StageTool[] = [
         const stop = Math.min(len, i.stop_distance ?? 1);
         points = [onFloor(host, [p[0] - (dx / len) * stop, p[2] - (dz / len) * stop])];
       } else return fail('Give `to`, `waypoints` or `toward`.');
+      // Each waypoint on the scene's floor, and the last off the other people, as a walker's spawn is.
+      const r = host.renderer;
+      const notes: string[] = [];
+      if (r?.collider) {
+        points = points.map((p) => [p[0], r2(r.standAt(p[0], p[2], c.height) ?? r.floorAt(p[0], p[2]) ?? p[1]), p[2]] as Vec3Tuple);
+        const last = points[points.length - 1]!;
+        const bodies = new NpcBodies();
+        for (const o of doc.characters) if (o.id !== c.id) { const q = placeAt(host, o, start).position; bodies.set(o.id, q[0], q[2], r.bodyRadius(o.height)); }
+        const apart = pushOutOfBodies(bodies, last[0], last[2], r.bodyRadius(c.height));
+        if (apart) {
+          points[points.length - 1] = [r2(apart.x), r2(r.standAt(apart.x, apart.z, c.height) ?? last[1]), r2(apart.z)];
+          notes.push(`the end point was on another person: stopped short at [${r2(apart.x)}, ${r2(apart.z)}]`);
+        }
+        const hit = walkProblem(host, from, points, c.height);
+        if (hit) return fail(`${c.name} cannot walk that way: the path runs into furniture or a wall near [${hit[0]}, ${hit[2]}]. Route round it with \`waypoints\` (get_world_layout shows where people can stand), or pick another end point.`);
+      }
       const gait = (i.gait ?? 'walk') as 'walk' | 'run' | 'none';
       const probe: StageMove = { id: '', start, end: start, points, easing: 'linear' };
       const distance = moveLength(from, probe);
@@ -829,6 +909,7 @@ export const STAGE_TOOLS: StageTool[] = [
       });
       return ok({
         move_id: move.id, from: v3(from), to: points[points.length - 1], start: move.start, end: move.end, metres: r2(distance),
+        ...(notes.length ? { moved: notes } : {}),
         ...(blocked.length ? { warning: `No floor found at ${JSON.stringify(blocked)} - they may walk through a wall or off the set. Check get_world_layout.` } : {}),
       });
     },
