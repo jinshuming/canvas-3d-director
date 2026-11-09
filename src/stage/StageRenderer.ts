@@ -1,3 +1,4 @@
+import type { SceneCollider } from '@viggle/splat-engine';
 import { Animation, Character, Environment, FlyControls, Scene, SplatRelight } from '@viggle/splat-engine';
 
 import { probeFacing, probeRootTravel } from '../engine/probes.js';
@@ -6,6 +7,8 @@ import { buildFloorIndex } from '../walk/floorIndex.js';
 import { isUprightFile, placementFromGround, placeWalkScene } from '../walk/placement.js';
 import type { CameraSample } from './camera.js';
 import { sampleShot, shotPath, sortedKeys } from './camera.js';
+import { armReach, boomFor, insideReach, pivotFor } from './cameraArm.js';
+import { DEFAULT_HEIGHT, STEP_FRACTION, StageColliders } from './collider.js';
 import { cutWithin, editCamera } from './cuts.js';
 import { sampleTrack, trackTravel } from './clips.js';
 import { sampleMoves } from './moves.js';
@@ -32,6 +35,8 @@ export interface StageAssetState {
   /** Clip URLs still loading. */
   loadingClips: string[];
   sceneLoading: boolean;
+  /** The scene's collider (its walls and floor) is still being built. */
+  sceneColliding: boolean;
   errors: string[];
 }
 
@@ -87,6 +92,10 @@ export class StageRenderer {
   private readonly livePositions = new Map<string, Vec3Tuple>();
   private readonly loadingClips = new Set<string>();
   private readonly errors: string[] = [];
+  /** The scene's walls and floor, built from its splats once it has loaded (see collider.ts). */
+  private readonly colliders = new StageColliders({
+    floorIndexAt: (x, z, aperture, fromY, maxDrop) => this.floor()?.floorAt(x, z, aperture, fromY, maxDrop) ?? null,
+  });
   /** The relighting component: made when the doc first has a light, then only switched and tuned. */
   private relight: SplatRelight | null = null;
   /** What has been handed to `relight` (a target is added once; the component drops one whose entity goes). */
@@ -316,6 +325,7 @@ export class StageRenderer {
       loadingCharacters: [...this.characters.entries()].filter(([, l]) => !l.character).map(([id]) => id),
       loadingClips: [...this.loadingClips],
       sceneLoading: this.sceneLoading,
+      sceneColliding: this.colliders.pending,
       errors: [...this.errors],
     };
   }
@@ -327,6 +337,7 @@ export class StageRenderer {
     this.fly.detach();
     this.relight?.destroy();
     this.relight = null;
+    this.colliders.reset();
     for (const l of this.characters.values()) l.character?.destroy();
     this.characters.clear();
     this.env?.destroy();
@@ -339,13 +350,18 @@ export class StageRenderer {
     const url = doc.scene?.url ?? null;
     if (url === this.envUrl) {
       // Same file, placement edited by hand: re-mount it.
-      if (this.env && doc.scene?.placement) this.mount(this.env, doc.scene.placement);
+      if (this.env && doc.scene?.placement) {
+        // Every doc change comes through here: the scene is only re-mounted, and its collider rebuilt, when its placement changed.
+        const key = JSON.stringify(doc.scene.placement);
+        if (key !== this.mountedKey) { this.mount(this.env, doc.scene.placement); this.buildCollider(this.env); }
+      }
       return;
     }
     this.envUrl = url;
     const ticket = ++this.envTicket;
     this.env?.destroy();
     this.env = null;
+    this.colliders.reset();
     if (!url || !doc.scene) { this.sceneLoading = false; this.emitState(); return; }
     const scene = doc.scene;
     const filename = filenameOf(url);
@@ -353,6 +369,8 @@ export class StageRenderer {
     const upright = given?.upright ?? isUprightFile(filename);
     const first: StagePlacement = given ?? { upright, scale: 1, floor: 0, start: [0, 0] };
     const t = placeWalkScene(first);
+    // Loaded already mounted by `first`: not a change when the doc says so too.
+    if (given) this.mountedKey = JSON.stringify(given);
     this.sceneLoading = true;
     this.emitState();
     Environment.load(this.scene, url, { rotation: t.rotation, position: t.position, scale: t.scale, filename })
@@ -370,6 +388,7 @@ export class StageRenderer {
         }
         this.sceneLoading = false;
         this.attachRelightTargets();
+        this.buildCollider(env);
         this.emitState();
         this.events.onSceneLoaded?.(placement, measured);
       })
@@ -382,7 +401,17 @@ export class StageRenderer {
       });
   }
 
+  /** Build the scene's collider around the capture point, where the floor is y = 0, and say when it lands. */
+  private buildCollider(env: Environment): void {
+    void this.colliders.build(env, { x: 0, y: 0, z: 0 }).then(() => { if (this.env === env) this.emitState(); });
+    this.emitState();
+  }
+
+  /** The placement the scene is mounted with now, as a string, to tell a hand edit of it from any other change. */
+  private mountedKey: string | null = null;
+
   private mount(env: Environment, placement: StagePlacement): void {
+    this.mountedKey = JSON.stringify(placement);
     const { position: p, rotation: r, scale: k } = placeWalkScene(placement);
     env.entity.setPosition(p.x, p.y, p.z);
     env.entity.setEulerAngles(r.x, r.y, r.z);
@@ -737,9 +766,69 @@ export class StageRenderer {
 
   /** The floor's height under (x, z), metres; null where the scene has no floor there (a hole, a wall, outside it). */
   floorAt(x: number, z: number, fromY = 1.2): number | null {
-    const index = this.floor();
-    if (!index) return null;
-    return index.floorAt(x, z, Math.max(index.cell, 0.15), fromY, 3);
+    // The collider's floor where it has one; the floor index where it has not (a gap in the capture, not a wall).
+    return this.colliders.floor(x, z, this.aperture(), fromY, false);
+  }
+
+  /**
+   * Where a body `height` tall can stand at (x, z): the floor there, or null where it does not fit (a wall,
+   * furniture). Read the way PINOC's walk reads it: looking down from two steps above the floor.
+   */
+  standAt(x: number, z: number, height = DEFAULT_HEIGHT, baseY = 0): number | null {
+    return this.colliders.floor(x, z, this.aperture(), baseY + height * STEP_FRACTION * 2, true, height);
+  }
+
+  private aperture(): number {
+    return Math.max(this.floor()?.cell ?? 0.15, 0.15);
+  }
+
+  /** The scene's collider, once built; null before, or for a scene with nothing to collide with. */
+  get collider(): SceneCollider | null {
+    return this.colliders.collider;
+  }
+
+  /** The horizontal radius of a person `height` tall: PINOC's capsule. */
+  bodyRadius(height = DEFAULT_HEIGHT): number {
+    return height * 0.18;
+  }
+
+  /** How deep a person `height` tall at (x, z) on `y` is inside solid scene (furniture, a wall): 0 when clear, or with no collider. */
+  overlapAt(x: number, z: number, y: number, height = DEFAULT_HEIGHT): number {
+    return this.colliders.overlap(x, z, y, height);
+  }
+
+  /** Where a person at (x, z) on `y` is nudged to when they stand inside a wall; null when clear (or no collider). */
+  pushOutAt(x: number, z: number, y: number, height = DEFAULT_HEIGHT): { x: number; z: number } | null {
+    return this.colliders.pushOut(x, z, y, height);
+  }
+
+  /** Whether a camera at `eye` is inside solid scene (a wall, a post): its ball, PINOC's boom radius for a person `height` tall, touches a solid cell. Null with no collider. */
+  cameraInsideSolid(eye: Vec3Tuple, height = DEFAULT_HEIGHT): boolean | null {
+    const c = this.colliders.collider;
+    return c ? !c.isClear({ x: eye[0], y: eye[1], z: eye[2] }, boomFor(height).radius) : null;
+  }
+
+  /**
+   * Whether a camera at `eye` sees a person standing at `feet`, `height` tall: PINOC's follow-camera boom run
+   * from their head to the eye. `blocked`: a wall is on the line; `partly_blocked`: the eye's ball would skim
+   * one; `inside`: the eye is inside solid. Null with no collider.
+   */
+  lineOfSight(eye: Vec3Tuple, feet: Vec3Tuple, height = DEFAULT_HEIGHT): { verdict: 'clear' | 'partly_blocked' | 'blocked'; inside: boolean } | null {
+    const c = this.colliders.collider;
+    if (!c) return null;
+    const boom = boomFor(height);
+    const pivot = pivotFor({ x: feet[0], y: feet[1], z: feet[2] }, height);
+    const e = { x: eye[0], y: eye[1], z: eye[2] };
+    const full = Math.hypot(e.x - pivot.x, e.y - pivot.y, e.z - pivot.z);
+    if (!(full > boom.min)) return { verdict: 'clear', inside: false };
+    const inside = !c.isClear(e, boom.radius);
+    // A wall ON the line, short of the eye.
+    const dir = { x: (e.x - pivot.x) / full, y: (e.y - pivot.y) / full, z: (e.z - pivot.z) / full };
+    const hit = c.raycast(pivot, dir, full);
+    if (hit !== null && hit < full - boom.radius) return { verdict: 'blocked', inside };
+    // The line is open but the eye's ball skims a wall, or the eye is in one.
+    const reach = Math.min(armReach(c, pivot, e, boom), insideReach(c, pivot, e, boom));
+    return { verdict: reach < full - 1e-3 ? 'partly_blocked' : 'clear', inside };
   }
 
   /**
@@ -754,7 +843,7 @@ export class StageRenderer {
     for (let j = -n; j <= n; j++) {
       const row: boolean[] = [];
       for (let i = -n; i <= n; i++) {
-        const y = this.floorAt(i * step, j * step);
+        const y = this.standAt(i * step, j * step);
         row.push(y !== null && Math.abs(y) < 0.35);
       }
       grid.push(row);
@@ -821,7 +910,8 @@ export class StageRenderer {
       const inFront = pts.every((p) => p.depth > 0.05);
       const head = project(at[0], at[1] + c.height * 0.92, at[2]);
       const headIn = head.depth > 0.05 && head.u >= 0 && head.u <= 1 && head.v >= 0 && head.v <= 1;
-      const sight = this.sightline(camera.position, [at[0], at[1] + c.height * 0.6, at[2]])?.verdict ?? 'unknown';
+      // The collider's line of sight where it has been built; the splat-count test where it has not.
+      const sight = this.lineOfSight(camera.position, at, c.height)?.verdict ?? this.sightline(camera.position, [at[0], at[1] + c.height * 0.6, at[2]])?.verdict ?? 'unknown';
       if (!inFront) return { id: c.id, name: c.name, inFront, box: null, visible: 0, cut: [], head_in_frame: headIn, line_of_sight: sight, distance, heightInFrame: 0 };
       const u0 = Math.min(...pts.map((p) => p.u)), u1 = Math.max(...pts.map((p) => p.u));
       const v0 = Math.min(...pts.map((p) => p.v)), v1 = Math.max(...pts.map((p) => p.v));

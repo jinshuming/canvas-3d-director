@@ -9,7 +9,7 @@ export async function settle(r: StageRenderer, timeoutMs = 20_000): Promise<stri
   const until = performance.now() + timeoutMs;
   for (;;) {
     const s = r.getAssetState();
-    if (!s.sceneLoading && !s.loadingCharacters.length && !s.loadingClips.length) return s.errors;
+    if (!s.sceneLoading && !s.sceneColliding && !s.loadingCharacters.length && !s.loadingClips.length) return s.errors;
     if (performance.now() > until) return [...s.errors, 'Some assets were still loading.'];
     await new Promise((res) => setTimeout(res, 150));
   }

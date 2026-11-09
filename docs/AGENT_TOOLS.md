@@ -124,6 +124,16 @@ contact_sheet    {frames: 6}                      → 走路、转身、挥手�
 - 角色之间的交互（拥抱、递东西）和避让还没有做。
 
 
+## 碰撞体
+
+照搬 PINOC：`src/stage/collider.ts`（来自 `walkCollider.ts`：围绕拍摄点裁剪点云、在 worker 里用引擎的 `SceneCollider` 构建、地面按中心加权读取、推出墙体）、`src/stage/cameraArm.ts`（来自 `cameraArm.ts`：相机球不能进墙、头到相机的连线不能被墙挡）、`src/stage/bodies.ts`（来自 `obstacles.ts`：人和人的脚印圆互相推开）。场景加载后在后台构建，约 1 秒。
+
+- `add_character` / `update_character`：站到场景地面的实际高度（路面常比舞台原点高 10–30 厘米），站在家具或墙里会被推出来，和别人重叠会被推开；回复里写明移到了哪里。
+- `move_character`：路径沿途每 10 厘米检查，连续撞上实体就拒绝并指出位置；终点落在别人身上会停在他身前；各个点的高度贴到地面。
+- `get_world_layout`：「#」是人站不下的地方（墙、家具），「.」是站得下的。
+- `check_framing`：视线 `line_of_sight` 用头到相机的连线判断（被墙挡、相机球擦墙），相机进到墙里时给 `camera_in_wall` 警告。
+- 碰撞体还没建好，或这个场景建不出来时，回到原来的做法（地面索引加点数统计）。
+
 ## 场景检测与补全
 
 参考 PINOC（`pinoc-backend` 的 `agentloop/scene_tools.go` 和 worker 的 `scene_build/src/core/viewsearch.ts`）。
