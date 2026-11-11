@@ -8,7 +8,7 @@ import { createDirectorHost } from './agentHost.ts';
 
 import type { ExportProgress } from './exporter.ts';
 import { download, exportEditVideo, exportFrame, exportShotVideo } from './exporter.ts';
-import { Icon, Logo } from './icons.tsx';
+import { Icon } from './icons.tsx';
 import { ExpandPanel } from './ExpandPanel.tsx';
 import { ExportDialog } from './ExportDialog.tsx';
 import type { H3Options } from './ExportDialog.tsx';
@@ -335,9 +335,9 @@ function StudioEditor({ stageId, nodeId, live, agentModel, initialChat, fresh, c
           <Viewport doc={doc} time={time} view={view} selection={selection} activeShot={shot?.id ?? null}
             update={update} onSelect={setSelection} onRenderer={setRenderer} />
 
-          {/* Top left: the app pill, as the reference product's "3D Studio 2.0" */}
+          {/* Top left: the app pill */}
           <div className="float pill-group top-left">
-            <a className="pill brand" {...linkProps('/canvas')} title="回到画布"><Logo /><span className="divider" /><span className="brand-name">World</span></a>
+            <a className="pill brand" {...linkProps('/canvas')} title="回到画布"><span className="brand-name">World</span></a>
             <button className="pill icon" onClick={() => setHistory(true)} title="历史 World：打开、加载或复制以前的 World"><Icon name="history" /></button>
             <div className="pill title-pill">
               <input className="title-input" value={doc.title} onChange={(e) => update((d) => ({ ...d, title: e.target.value }))} />

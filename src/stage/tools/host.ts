@@ -6,7 +6,7 @@ import type { StageDoc } from '../types.js';
  * it, the renderer (for anything that looks), and the asset library.
  *
  * The director implements it in the browser, where the renderer lives. A
- * server-side agent loop proxies the same calls to the page (the reference product calls
+ * server-side agent loop proxies the same calls to the page (sometimes called
  * these "client tools"); the edit tools themselves are pure and run anywhere.
  */
 export interface StageToolHost {

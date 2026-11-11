@@ -1,4 +1,4 @@
-/* The World agent panel: the reference product's chat column, with the agent's work shown as folded steps. */
+/* The World agent panel: the chat column, with the agent's work shown as folded steps. */
 .ag-panel { width: 400px; transition: width 0.2s; }
 .ag-panel.wide { width: 560px; }
 .ag-title { max-width: 220px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

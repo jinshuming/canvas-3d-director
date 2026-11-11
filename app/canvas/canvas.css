@@ -1,9 +1,9 @@
-/* the reference product's canvas: a black dotted board, floating dark pills, and the Agent column on the right. */
+/* A black dotted board, floating dark pills, and the Agent column on the right. */
 .cv-root { height: 100%; display: grid; grid-template-columns: 1fr calc(500px * var(--cv-ui, 1)); background: #000; overflow: hidden; color: #f4f4f5; }
 /* The floating UI and the Agent column scale as one with the window (--cv-ui, set by the page); the board scales in its own transform. */
 .cv-root .cv-float, .cv-root > .cv-chat { zoom: var(--cv-ui, 1); }
 .cv-root > .cv-chat { min-width: 0; overflow: hidden; }
-/* the reference product's chat text is large next to its compact chrome (about a third of a top pill's height). */
+/* Chat text is large next to its compact chrome (about a third of a top pill's height). */
 .cv-root > .cv-chat .cv-chat-head strong { font-size: 19px; }
 .cv-root > .cv-chat .cv-msg { font-size: 18px; }
 .cv-root > .cv-chat .cv-tip { font-size: 16px; }

@@ -15,7 +15,7 @@
 | 先看再说完成 | 每次编辑后都能用 `look` / `contact_sheet` 看画面，用 `check_framing` 拿数字（入画比例、头在不在画面里、视线有没有被挡、相机有没有出场景），发现问题自己改 |
 | 错误可读 | 工具从不抛异常。调用写错了，会返回 `is_error` 和可以改正的信息，比如"没有这个角色，场上有：…" |
 | 花钱有上限 | 每个工具标了 `effect`：`read` 只读、`edit` 改片场、`cost` 扣额度、`ui` 操作界面。`cost` 默认**直接扣，不弹确认**，由 Agent 回复里说明花了多少；每次请求最多生成 4 次、补全 2 次，超过的被拒绝。想恢复确认卡片：`localStorage['director:spend'] = 'ask'`；评测用 `window.__spendMode = 'deny'`，调用照常发起但不花钱 |
-| 宿主无关 | 工具只依赖 `StageToolHost`：读写文档、渲染器、素材库、界面钩子。浏览器里跑全部工具；服务端 agent loop 可以把"看"的工具转发给页面执行（the reference product 叫 client tools），编辑工具是纯函数，在哪都能跑 |
+| 宿主无关 | 工具只依赖 `StageToolHost`：读写文档、渲染器、素材库、界面钩子。浏览器里跑全部工具；服务端 agent loop 可以把"看"的工具转发给页面执行（即 client tools），编辑工具是纯函数，在哪都能跑 |
 
 返回格式就是 Messages API 的 `tool_result` 内容：文字加 base64 JPEG。把 `stageToolDefinitions()` 直接作为 `tools` 传给模型，用 `runStageTool(name, input, host)` 执行。
 

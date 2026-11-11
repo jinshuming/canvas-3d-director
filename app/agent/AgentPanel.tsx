@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 
 import type { IconName } from '../icons.tsx';
-import { Icon, Logo } from '../icons.tsx';
+import { Icon } from '../icons.tsx';
 import { AGENT_SUGGESTIONS, WORLD_STARTERS } from '../shared/agentPrompt.ts';
 import '../canvas/canvas.css';
 import './agent.css';
@@ -70,13 +70,13 @@ export function AgentPanel({ items, busy, model, lastTurn, fresh = false, onSend
             <div className="cv-hello">
               {fresh ? (
                 <>
-                  <h2><Logo size={30} /> 新的 World</h2>
+                  <h2>新的 World</h2>
                   <h1>想拍一场什么样的戏？</h1>
                   <p className="ag-lead">描述人物、地点、动作和镜头，我来选场景、放角色、编排动作、架好机位，做完给你预览。</p>
                 </>
               ) : (
                 <>
-                  <h2><Logo size={30} /> Hi there!</h2>
+                  <h2>Hi there!</h2>
                   <h1>What are we making today?</h1>
                 </>
               )}

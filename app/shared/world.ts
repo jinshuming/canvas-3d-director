@@ -17,7 +17,7 @@ import { blankStage } from './blank.ts';
  * the server merges each into the file under a per-world lock.
  */
 
-export const WORLD_FORMAT = 'canvas.world';
+export const WORLD_FORMAT = 'director.world';
 export const WORLD_SCHEMA = 1;
 
 export interface WorldFile {
@@ -114,7 +114,7 @@ export function copyWorld(src: WorldFile, id: string, title = `${src.title} å‰¯æ
  */
 export function readWorld(raw: unknown): WorldFile {
   const w = raw as Partial<WorldFile> | null;
-  if (!w || w.format !== WORLD_FORMAT) throw new Error('Not a World file.');
+  if (!w || typeof w.format !== 'string' || !w.format.endsWith('.world')) throw new Error('Not a World file.');
   if (typeof w.schema !== 'number' || w.schema > WORLD_SCHEMA) throw new Error(`World schema ${w.schema} is newer than this app understands.`);
   if (!w.id || !w.stage) throw new Error('World file is missing its id or stage.');
   return {

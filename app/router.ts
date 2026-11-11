@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 
 /**
  * Path routes:
- *   /canvas               the canvas (a mock, for the demo)
+ *   /canvas               the canvas (a demo board)
  *   /canvas/world         every World project
  *   /canvas/world/<id>    the 3D Studio on one World; `?node=<id>` names the
  *                         canvas node it was entered from
