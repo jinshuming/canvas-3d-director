@@ -6,20 +6,17 @@
 
 用一句话描述一场戏，Agent 用 Viggle API 生成场景（splat）、角色（vsplat）和动作（motion），把它们摆进同一个 3D 片场，加机位、设计运镜。用户可以在浏览器里预览、微调，然后导出画面或视频，交给 Viggle 的视频模型出成片。
 
-## 2. 从 TapNow 3D 导演台学到的设计要点
+## 2. 设计要点
 
-| TapNow 的做法 | 我们的对应做法 |
-|---|---|
-| 整个片场就是一份 glTF，人、Agent、外部工具都读写这同一份文件 | 一份 **Stage 文档**（JSON）作为唯一数据源，导出时转成 glTF（相机和运镜部分） |
-| 镜头 = glTF camera 节点，运镜 = glTF animation | 镜头和运镜都是一等对象，字段语义和 glTF 的 camera / animation 对齐 |
-| 粗活交给 Agent（搭景、加镜头、初版运镜），细活交给编辑器（曲线、缓动） | 同样两层：对话生成，加关键帧 / 缓动的手动精修 |
-| 用户选中物体时，告诉 Agent `node_index + scene_version + sha256` | 选中引用：`{ objectId, docVersion }`，Agent 改之前必须读最新版本 |
-| 用版本号 + 乐观锁，保存失败时保留本地修改 | 文档带 `version`，服务端用 CAS 写入；冲突时 Agent 重新读取后重试 |
-| Agent 能调用浏览器端工具（聚焦、导出帧、导出视频） | 浏览器端工具：`focus`、`capture_frame`、`render_shot` |
-| 导出帧和视频，自动生成画布节点，接视频模型 | 导出后直接调 Viggle 视频生成（首帧、参考视频），结果作为成片 |
-| 路径和时间节奏分开（路径曲线 + 时间缓动） | MVP 只做关键帧 + 缓动预设；切线编辑器放到 V2 |
+- **Stage 文档**（JSON）是唯一数据源，人、Agent、外部工具都读写同一份，导出时转成 glTF（相机和运镜部分）。
+- 镜头和运镜是一等对象，字段语义与 glTF 的 camera / animation 对齐。
+- 粗活交给 Agent（搭景、加镜头、初版运镜），细活交给编辑器（关键帧、缓动）。
+- 选中引用 `{ objectId, docVersion }`；文档带 `version`，服务端用 CAS 写入，冲突时 Agent 重新读取后重试。
+- 浏览器端工具：`focus`、`capture_frame`、`render_shot`。
+- 导出后可直接调 Viggle 视频生成（首帧、参考视频），结果作为成片。
+- MVP 只做关键帧 + 缓动预设；切线编辑器放到 V2。
 
-**我们的差异化**：TapNow 的片场是白模，真实感全靠下游模型。Viggle 的场景、角色、动作都是真实生成的 3D 资产（照片级 splat 场景、可驱动的 splat 角色、AI 动作），**预演画面本身就接近成片**，下游视频模型只需要"润色"，不需要"重新想象"。
+**我们的差异化**：传统片场预演多为白模，真实感全靠下游模型。Viggle 的场景、角色、动作都是真实生成的 3D 资产（照片级 splat 场景、可驱动的 splat 角色、AI 动作），**预演画面本身就接近成片**，下游视频模型只需要"润色"，不需要"重新想象"。
 
 ## 3. MVP 范围
 
@@ -155,7 +152,7 @@
 | `upsert_shot(shot)` | 新建或修改镜头和关键帧 | — |
 | `generate_video(shotId, mode, prompt)` | 把渲染结果送去出成片 | Videos（首帧 / 参考视频） |
 
-所有写操作都带上 `baseVersion`，版本对不上就失败，Agent 重新 `read_stage` 后再试。这一点照搬 TapNow 的做法。
+所有写操作都带上 `baseVersion`，版本对不上就失败，Agent 重新 `read_stage` 后再试。
 
 ### 浏览器端工具（Agent 请求，前端执行）
 
@@ -166,7 +163,7 @@
 | `render_shot(shotId)` | 离线渲染整段镜头为 MP4 |
 | `measure_gaps()` | 调 `findGaps`，告诉 Agent 哪里有空洞，需要补图 |
 
-`capture_frame` 是关键：**Agent 能看到自己摆的机位截图**，自己检查构图（角色有没有出画、背后是不是空洞），然后修正。这是 TapNow 没做而我们可以做的。
+`capture_frame` 是关键：**Agent 能看到自己摆的机位截图**，自己检查构图（角色有没有出画、背后是不是空洞），然后修正。这是我们的差异点。
 
 ### 选中引用
 

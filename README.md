@@ -1,6 +1,6 @@
-# TapNow 3D Director
+# 3D Director
 
-一个仿 TapNow 3D Studio 的 3D 导演台（World）。场景（splat）、角色（vsplat）和动作（motion glb）都用 Viggle 生成。可以手动搭戏，也可以用自然语言让 Agent 搭：放角色、编排动作和走位、架机位、设计运镜，最后导出画面和视频。
+一个通用的 3D 导演台（World）。场景（splat）、角色（vsplat）和动作（motion glb）都用 Viggle 生成。可以手动搭戏，也可以用自然语言让 Agent 搭：放角色、编排动作和走位、架机位、设计运镜，最后导出画面和视频。
 
 ```bash
 npm install
@@ -18,7 +18,7 @@ npm run dev                  # http://localhost:5193/canvas
 
 | 路径 | 页面 |
 |---|---|
-| `/canvas` | 仿 TapNow 画布，用于演示。左侧 ＋ → World 新建一个 World 节点（同时新建一个 World 工程），点「开始搭建」进入 |
+| `/canvas` | 画布，用于演示。左侧 ＋ → World 新建一个 World 节点（同时新建一个 World 工程），点「开始搭建」进入 |
 | `/canvas/world` | 所有 World 工程：搜索、打开、复制、删除（移到回收站） |
 | `/canvas/world/<id>?node=<节点>` | 3D 导演台，右侧是 Agent 对话面板。左上角「历史」按钮可以把以前的 World 加载到当前节点 |
 

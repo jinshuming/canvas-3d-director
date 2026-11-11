@@ -3,14 +3,14 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api.ts';
 import type { WorldSummary } from '../shared/world.ts';
 import type { IconName } from '../icons.tsx';
-import { Icon, Logo } from '../icons.tsx';
+import { Icon } from '../icons.tsx';
 import { navigate, worldPath } from '../router.ts';
 import './canvas.css';
 import type { CanvasNode, CanvasState, NodeKind } from './model.ts';
 import { loadCanvas, newId, NODE_LABEL, NODE_SIZE, saveCanvas } from './model.ts';
 
 /**
- * A stand-in for TapNow's canvas, for the demo: the board, its nodes and the
+ * A demo canvas: the board, its nodes and the
  * Agent panel look the part, and one node is real - World, which opens the
  * 3D Studio on its own stage.
  */
@@ -56,7 +56,7 @@ export function CanvasPage() {
   }, []);
 
   const { view } = state;
-  // The whole canvas UI scales with the window, in TapNow's proportions; the board draws at view.zoom × ui.
+  // The whole canvas UI scales with the window, in fixed proportions; the board draws at view.zoom × ui.
   const ui = useUiScale();
   const scale = view.zoom * ui;
   const setView = (v: Partial<CanvasState['view']>) => setState((s) => ({ ...s, view: { ...s.view, ...v } }));
@@ -84,7 +84,7 @@ export function CanvasPage() {
   useEffect(() => {
     const el = board.current;
     if (!el) return;
-    // Pinch (ctrl+wheel) or ⌘-wheel zooms round the cursor; a plain wheel pans, as on TapNow.
+    // Pinch (ctrl+wheel) or ⌘-wheel zooms round the cursor; a plain wheel pans.
     const onWheel = (e: WheelEvent) => {
       if ((e.target as HTMLElement).closest('.cv-float')) return;
       e.preventDefault();
@@ -184,7 +184,7 @@ export function CanvasPage() {
 
         {/* Top left: the project pill */}
         <div className="cv-float cv-top-left">
-          <button className="cv-pill cv-project"><Logo size={30} /><span className="cv-divider" /><span>3D Studio 2.0</span><Icon name="chevronDown" size={16} /></button>
+          <button className="cv-pill cv-project"><span>3D Studio</span><Icon name="chevronDown" size={16} /></button>
         </div>
 
         {/* Top right of the board */}
@@ -319,7 +319,7 @@ function ChatPanel() {
       <div className="cv-chat-body">
         {messages.length === 0 ? (
           <div className="cv-hello">
-            <h2><Logo size={30} /> Hi there!</h2>
+            <h2>Hi there!</h2>
             <h1>What are we making today?</h1>
             <div className="cv-suggest">
               <button className="cv-card tilt-l" onClick={() => setText('Review this canvas and suggest the clearest next creative step.')}>
@@ -360,7 +360,7 @@ function ChatPanel() {
   );
 }
 
-/** The board a first visit opens on: the shape of TapNow's 3D Studio canvas, plus a World. */
+/** The board a first visit opens on: a canvas board plus a World. */
 function seed(): CanvasState {
   const img: CanvasNode = { id: 'seed_img', kind: 'image', x: 140, y: 320, w: 230, h: 154 };
   const video: CanvasNode = { id: 'seed_video', kind: 'video', x: 460, y: 150, w: 190, h: 106 };
@@ -375,7 +375,7 @@ function seed(): CanvasState {
 }
 
 /**
- * The canvas UI's scale: TapNow's proportions at any window size (its top
+ * The canvas UI's scale: fixed proportions at any window size (its top
  * pills are about 5.6% of the window height, the Agent column about a quarter
  * of its width), so a small window shows the same layout, smaller. 1 at a
  * 1000 × 1600 window and up; never below 0.5, about where text stops being readable.

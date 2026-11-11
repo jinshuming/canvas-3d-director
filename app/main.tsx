@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client';
 
 import { api } from './api.ts';
 import { CanvasPage } from './canvas/CanvasPage.tsx';
-import { Icon, Logo } from './icons.tsx';
+import { Icon } from './icons.tsx';
 import { linkProps, navigate, useRoute, worldPath } from './router.ts';
 import { Studio } from './Studio.tsx';
 import { WorldBrowser } from './WorldBrowser.tsx';
@@ -17,7 +17,7 @@ function Worlds() {
   };
   return (
     <div className="home wide">
-      <div className="home-brand"><Logo size={40} /><h1>World</h1></div>
+      <div className="home-brand"><h1>World</h1></div>
       <p className="lead">每个 World 是一个工程文件：场景、角色、动作、镜头，以及和 Agent 的对话。</p>
       <div className="btn-row">
         <button className="pill primary" disabled={creating} onClick={() => void create()}><Icon name="plus" />新建 World</button>

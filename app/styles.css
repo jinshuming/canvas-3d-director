@@ -1,5 +1,5 @@
 /*
- * TapNow's visual language: a black dotted canvas, floating rounded dark
+ * A black dotted canvas, floating rounded dark
  * surfaces with a hairline edge, pill controls, white primary actions, blue
  * status dots, big confident type.
  */
@@ -75,7 +75,7 @@ kbd { font: 600 11px/1 ui-monospace, Menlo, monospace; padding: 2px 5px; border-
 .select-pill select:focus { background: transparent; }
 .select-pill option { background: #1c1c1c; }
 
-/* Segmented control: TapNow's Private / Team switch. */
+/* Segmented control: Private / Team switch. */
 .seg { display: inline-flex; padding: 4px; gap: 2px; background: var(--surface); border: 1px solid var(--edge); border-radius: 14px; }
 .seg.wide { display: flex; margin: 0 16px; background: var(--surface-2); }
 .seg.wide button { flex: 1; justify-content: center; }
@@ -120,7 +120,7 @@ kbd { font: 600 11px/1 ui-monospace, Menlo, monospace; padding: 2px 5px; border-
 .save-dot.error, .save-dot.conflict { background: var(--danger); }
 .save-text { color: var(--muted); font-size: 12.5px; }
 
-/* Left rail: TapNow's vertical tool column. */
+/* Left rail: vertical tool column. */
 .rail {
   left: 18px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; align-items: center; gap: 8px;
   padding: 10px 8px; background: rgba(23, 23, 23, 0.9); border: 1px solid var(--edge); border-radius: 26px; box-shadow: var(--shadow);
@@ -209,7 +209,7 @@ kbd { font: 600 11px/1 ui-monospace, Menlo, monospace; padding: 2px 5px; border-
 .playhead { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: #f4f4f5; z-index: 4; cursor: ew-resize; }
 .playhead::before { content: ""; position: absolute; top: 2px; left: -5px; width: 12px; height: 12px; border-radius: 50%; background: #f4f4f5; }
 
-/* ── Side panel: TapNow's chat column ─────────────────────────────────── */
+/* ── Side panel: chat column ─────────────────────────────────── */
 .side { background: var(--side); border-left: 1px solid var(--edge); border-radius: 22px 0 0 22px; display: flex; flex-direction: column; min-height: 0; }
 .side-head { display: flex; align-items: center; gap: 12px; height: 68px; padding: 0 18px 0 22px; color: #d4d4d8; }
 .side-head strong { font-size: 16px; color: var(--text); }

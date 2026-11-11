@@ -1,4 +1,4 @@
-/** Line icons in the 24-unit, 2px-stroke style TapNow uses (lucide-style paths). */
+/** Line icons in a 24-unit, 2px-stroke style (lucide-style paths). */
 
 const PATHS = {
   plus: <path d="M12 5v14M5 12h14" />,
@@ -69,18 +69,3 @@ export function Icon({ name, size = 18, className }: { name: IconName; size?: nu
   );
 }
 
-/** The four-colour orb in the top-left pill. */
-export function Logo({ size = 26 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden="true">
-      <defs>
-        <radialGradient id="lg-a" cx="30%" cy="30%" r="70%"><stop offset="0" stopColor="#ffd0e6" /><stop offset="1" stopColor="#ff6fae" /></radialGradient>
-        <radialGradient id="lg-b" cx="70%" cy="30%" r="70%"><stop offset="0" stopColor="#d6f0ff" /><stop offset="1" stopColor="#4f9dff" /></radialGradient>
-        <radialGradient id="lg-c" cx="50%" cy="80%" r="70%"><stop offset="0" stopColor="#fff2b8" /><stop offset="1" stopColor="#ffb547" /></radialGradient>
-      </defs>
-      <circle cx="12" cy="13" r="9" fill="url(#lg-a)" opacity="0.95" />
-      <circle cx="20" cy="13" r="9" fill="url(#lg-b)" opacity="0.85" />
-      <circle cx="16" cy="20" r="9" fill="url(#lg-c)" opacity="0.8" />
-    </svg>
-  );
-}

@@ -24,7 +24,7 @@
 
 ```jsonc
 {
-  "format": "tapnow.world",     // 格式标记：不是这个值的文件会被拒绝读取
+  "format": "director.world",     // 格式标记：不是这个值的文件会被拒绝读取
   "schema": 1,                  // 结构版本：比代码支持的版本还新时，拒绝读取
   "id": "wld_…",                // 和 stage.id 相同；由旧片场迁移来的 World 保留原来的 stg_… id
   "title": "客厅里的两人对话",

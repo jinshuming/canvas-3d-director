@@ -1,7 +1,7 @@
 {
-  "name": "tapnow-3d-director",
+  "name": "3d-director",
   "version": "0.1.0",
-  "description": "TapNow-style 3D director (World) on Viggle assets: a canvas with World nodes, a stage editor for characters, motions, movement and shots, and an agent that builds scenes from plain language.",
+  "description": "3D director (World) on Viggle assets: a canvas with World nodes, a stage editor for characters, motions, movement and shots, and an agent that builds scenes from plain language.",
   "license": "UNLICENSED",
   "private": true,
   "type": "module",
