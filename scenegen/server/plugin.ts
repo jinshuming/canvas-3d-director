@@ -38,8 +38,8 @@ import type { TurnBody } from '../../app/server/openaiRelay.ts';
 import { SCENEGEN_INSTRUCTIONS } from '../agent/prompt.ts';
 import { Jst2Client } from './jst2.ts';
 import { createMockJst2, MOCK_PREFIX } from './mockjst2.ts';
-import { sam3d } from './objects.ts';
-import { eraseObjects, falFluxDepthProvider, jst2ReferenceProvider, openaiImageProvider, peopleCheck } from './pano.ts';
+import { deadline, sam3d } from './objects.ts';
+import { falFluxDepthProvider, jst2ReferenceProvider, openaiImageProvider, paintObject, peopleCheck } from './pano.ts';
 import { buildLayout, requestSpec } from './quickLayout.ts';
 import type { PanoProvider } from './pano.ts';
 import { renderConditions, textToScene } from './textScene.ts';
@@ -276,7 +276,11 @@ export function scenegenServer(opts: ScenegenOptions): Plugin {
       // Key objects as SAM 3D assets + the environment without them, when SAM 3D (fal) and the image edit (OpenAI) are both there.
       const objects = body.objects !== false && opts.falKey && opts.openai?.apiKey ? {
         sam3d: (image: Uint8Array, box: [number, number, number, number]) => sam3d(image, box, opts.falKey),
-        erase: (input: Parameters<typeof eraseObjects>[1]) => eraseObjects({ apiKey: opts.openai?.apiKey, base: opts.openai?.base, model: opts.imageModel }, input),
+        paint: (input: Parameters<typeof paintObject>[1]) => {
+          // A deadline per edit (they take 15-30 s) and one retry, so one stalled request cannot hold the job.
+          const once = () => deadline(paintObject({ apiKey: opts.openai?.apiKey, base: opts.openai?.base, model: opts.imageModel }, { ...input, signal: AbortSignal.timeout(180_000) }), 180_000, 'Painting the object');
+          return once().catch(() => once());
+        },
       } : undefined;
       const job = startJob(proj, 'text', (j, signal) => textToScene(layout, join(pdir(proj.id), 'out'), {
         jst2, provider, styleImage, maxFills, vision, objects, prompt: typeof body.prompt === 'string' && body.prompt.trim() ? body.prompt.trim() : undefined, signal,

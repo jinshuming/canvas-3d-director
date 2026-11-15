@@ -14,7 +14,7 @@ import { Viewport } from './Viewport.tsx';
 
 interface ChatState { items: ChatItem[]; previousId: string | null }
 
-const STAGES: Record<string, string> = { conditions: '渲染白模', pano: '生成全景图', erase: '擦除物体', scale: '测量尺度', scene: 'JST-2 建环境', fill: '检测并补缺口', objects: 'SAM 3D 物体（与环境并行）', compose: '合成', verify: '校验', done: '完成', start: '开始' };
+const STAGES: Record<string, string> = { conditions: '渲染白模', pano: '生成全景图', scale: '测量尺度', scene: 'JST-2 建环境', fill: '检测并补缺口', objects: 'SAM 3D 物体（与环境并行）', compose: '合成', verify: '校验', done: '完成', start: '开始' };
 
 export function TextProject({ project, config, onChanged }: { project: Project; config: Config; onChanged: () => void }) {
   const [layout, setLayout] = useState<Layout>(project.layout);
@@ -221,7 +221,8 @@ export function TextProject({ project, config, onChanged }: { project: Project; 
           {r.candidates && r.candidates.length > 1 && <div className="cands">{r.candidates.map((c, i) => <figure key={c.file} className={i === r.chosen ? 'on' : ''}><img src={file(project.id, `out/${c.file}`, stamp)} alt="" /><figcaption>{c.objects?.toFixed(2) ?? '—'}{c.people?.prominent ? ' · 有人物' : ''}{i === r.chosen ? ' · 选中' : ''}</figcaption></figure>)}</div>}
           <div className="row">
             <a href={file(project.id, `out/${r.files.scene}`, stamp)} download>下载 .spz（合成）</a>
-            <a href={file(project.id, `out/${r.files.panorama}`, stamp)} target="_blank" rel="noreferrer">全景图</a>
+            <a href={file(project.id, `out/${r.files.panorama}`, stamp)} target="_blank" rel="noreferrer">环境全景图</a>
+            {r.files.blockoutFull && <a href={file(project.id, `out/${r.files.blockoutFull}`, stamp)} target="_blank" rel="noreferrer">完整白模</a>}
             <a href={file(project.id, 'out/prompt.txt', stamp)} target="_blank" rel="noreferrer">prompt</a>
           </div>
           <button className="primary wide" onClick={() => void api.exportScene(project.id).then((x) => { setExported({ sceneId: x.sceneId, at: new Date().toISOString() }); onChanged(); }).catch((e) => setError((e as Error).message))}>{exported ? '已导入导演台 · 再导一次' : '导入导演台素材库'}</button>
