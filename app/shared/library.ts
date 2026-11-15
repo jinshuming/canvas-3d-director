@@ -9,6 +9,8 @@ export interface LibraryScene {
   viggle: { sessionId: string; batchIds: string[] } | null;
   /** The scene this one is a filled-in version of. */
   parentId?: string;
+  /** From the scene generator: its blockout (scenegen/core/types.ts Layout), in the scene's own frame. */
+  layoutUrl?: string;
   createdAt: string;
 }
 

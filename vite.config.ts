@@ -2,6 +2,7 @@ import { fileURLToPath } from 'node:url';
 import { defineConfig, loadEnv } from 'vite';
 
 import { directorServer } from './app/server/plugin.ts';
+import { scenegenServer } from './scenegen/server/plugin.ts';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
 const here = (p: string) => fileURLToPath(new URL(p, import.meta.url));
@@ -32,7 +33,22 @@ export default defineConfig(({ mode }) => {
           panorama: here('./assets/seed/modern-living-room-pano.png'),
         }],
       }),
+      // The scene generator (/scenegen/): text → blockout → 3DGS, video → poses → 3DGS. Separate
+      // from the director; it hands finished scenes to the library above. FAL_KEY enables the
+      // FLUX depth panorama provider; SCENEGEN_POSED_IMAGES_BASE points the video path at a real
+      // JST-2 posed-images endpoint (unset: the built-in mock).
+      scenegenServer({
+        dataDir: here('./.data'),
+        viggleKey: env.VIGGLE_API_KEY || undefined,
+        viggleBase: env.VIGGLE_API_BASE_URL || undefined,
+        posedImagesBase: env.SCENEGEN_POSED_IMAGES_BASE || undefined,
+        falKey: env.FAL_KEY || undefined,
+        openai: { apiKey: env.OPENAI_API_KEY || undefined, model: env.OPENAI_MODEL || 'gpt-6-luna', base: env.OPENAI_BASE_URL || undefined },
+        imageModel: env.SCENEGEN_IMAGE_MODEL || 'gpt-image-2',
+        port: 5193,
+      }),
     ],
+    build: { rollupOptions: { input: { main: here('./index.html'), scenegen: here('./scenegen/index.html') } } },
     server: { port: 5193 },
   };
 });
