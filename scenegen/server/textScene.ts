@@ -19,13 +19,13 @@ import { toServiceC2W } from '../core/frame.ts';
 import type { CameraPose } from '../core/frame.ts';
 import { buildScene } from '../core/geometry.ts';
 import { concatGaussians, readSpzGaussians, writeSpzGaussians } from '../core/gaussians.ts';
-import { depthImage, depthRange, objectMask, renderEquirect, semanticImage, shadedImage } from '../core/render.ts';
+import { depthImage, depthRange, renderEquirect, semanticImage, shadedImage } from '../core/render.ts';
 import { distanceToFloor, readSpz } from '../core/spz.ts';
 import type { Layout } from '../core/types.ts';
 import { EYE_HEIGHT } from '../core/types.ts';
 import { scorePanoramas } from './alignScore.ts';
 import { autoFill, fillBudget } from './fill.ts';
-import { generateObjects, planObjects } from './objects.ts';
+import { environmentLayout, generateObjects, planObjects } from './objects.ts';
 import type { ObjectAsset } from './objects.ts';
 import type { FillResult } from './fill.ts';
 import { Jst2Client, newSessionId } from './jst2.ts';
@@ -53,7 +53,7 @@ export interface TextSceneResult {
   chosen: number;
   /** Key objects generated as their own assets (SAM 3D), fitted to the blockout; empty when objects are off. */
   objects: ObjectAsset[];
-  files: { depth: string; semantic: string; shaded: string; panorama: string; panoramaEnv: string | null; environment: string; scene: string; layout: string };
+  files: { depth: string; semantic: string; shaded: string; panorama: string; blockoutFull: string | null; environment: string; scene: string; layout: string };
   legend: Array<{ cls: string; color: [number, number, number]; share: number }>;
   seconds: Record<string, number>;
 }
@@ -101,7 +101,7 @@ export async function renderConditions(layout: Layout, dir: string) {
 
 export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst2Client; provider: PanoProvider; prompt?: string; styleImage?: { bytes: Uint8Array; mime: string }; maxFills?: number | 'auto'; vision?: PeopleCheck; candidates?: number;
   /** Generate key objects separately (SAM 3D) and the environment without them. Off: one 3DGS of everything. */
-  objects?: { sam3d: (image: Uint8Array, box: [number, number, number, number]) => Promise<{ ply: Uint8Array; seconds: number }>; erase: (input: { pano: Uint8Array; mask: { rgba: Uint8Array; width: number; height: number }; labels: string[] }) => Promise<Uint8Array> }; signal?: AbortSignal; onProgress?: Progress }): Promise<TextSceneResult> {
+  objects?: { sam3d: (image: Uint8Array, box: [number, number, number, number]) => Promise<{ ply: Uint8Array; seconds: number }>; paint: (input: { image: Uint8Array; guide: Uint8Array; size: number; box: [number, number, number, number]; label: string; style?: string }) => Promise<Uint8Array> }; signal?: AbortSignal; onProgress?: Progress }): Promise<TextSceneResult> {
   const p = deps.onProgress ?? (() => {});
   const seconds: Record<string, number> = {};
   let t = Date.now();
@@ -109,8 +109,18 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
   let credits = 0;
 
   p('conditions', 'Finding the capture point and rendering the blockout');
-  const c = await renderConditions(layout, dir);
-  const prompt = deps.prompt ?? compileCaption(layout, c.capture);
+  // With SAM 3D objects, the environment is painted from the blockout WITHOUT them (the full blockout,
+  // rendered from the same point, only guides where they are painted into the object panorama).
+  const full = deps.objects ? await renderConditions(layout, join(dir, 'blockout-full')) : null;
+  const plan = deps.objects ? planObjects(layout) : { assets: [], remove: new Set<number>() };
+  // Its caption must not name them either - the user's words and the materials line do, and the image
+  // model paints what the text names whatever the depth map says (measured: with the user's words the
+  // counter, sofa and table came back; without them, the counter the style summary named still did). So: no user prompt, no style summary, no materials (palette and lighting stay), and the removed
+  // things named as absent.
+  const removed = [...plan.remove].map((i) => layout.objects[i]!.label);
+  const envLayout = plan.remove.size ? { ...environmentLayout(layout, plan.remove), prompt: '', style: { ...layout.style, summary: '', materials: '' }, capture: full!.capture } : layout;
+  const c = await renderConditions(envLayout, dir);
+  const prompt = deps.prompt ?? compileCaption(envLayout, c.capture) + (removed.length ? `\nThese are NOT in the place (they will be added later): ${removed.join('; ')}. Where the blockout shows open floor, paint open floor - no furniture that the blockout does not show.` : '');
   // THE SCENE FILE'S FRAME: the capture point at the origin, metres, +Y up (the floor at y = -1.5) -
   // what the director assumes of every generated scene (its placement, gap check and fill measure from
   // the file's origin). The blockout is the same frame shifted by the capture point; the layout file says so.
@@ -127,7 +137,7 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
   // that follows the blockout best, with no life-size figure in it, is kept.
   const many = deps.provider.id === 'openai-image';
   const n = many ? Math.max(1, deps.candidates ?? 3) : 1;
-  const geometry = geometryNote(layout, c.capture);
+  const geometry = geometryNote(envLayout, c.capture);
   const paint = () => deps.provider.generate({ prompt, depth: c.depth, semantic: c.semantic, shaded: c.shaded, geometry, withClay: many, styleImage: many ? undefined : deps.styleImage, signal: deps.signal, onProgress: () => {} });
   await mkdir(join(dir, 'candidates'), { recursive: true });
   const candidates: PanoCandidate[] = [];
@@ -172,31 +182,30 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
   lap('pano');
 
   // ── Objects and environment, side by side ─────────────────────────────────
-  // Key objects (and what crowds them) become SAM 3D assets cut from THIS panorama; the environment
-  // is rebuilt from the same panorama with them erased, so nothing is in the room twice.
-  const plan = deps.objects ? planObjects(layout, c.buffers) : { assets: [], erase: new Set<number>() };
-  let envPano = pano;
-  if (deps.objects && plan.erase.size) {
-    p('pano', `Erasing ${plan.erase.size} objects from the environment's panorama`);
-    const bytes = await deps.objects.erase({ pano: pano.bytes, mask: { rgba: objectMask(c.buffers, plan.erase), width: c.buffers.width, height: c.buffers.height }, labels: [...plan.erase].map((i) => layout.objects[i]!.label) });
-    envPano = { bytes, mime: 'image/png' };
-    await writeFile(join(dir, 'panorama-env.png'), bytes);
-    lap('erase');
-  }
-  // Runs beside the environment: its own wall time, not a lap of the sequence.
+  // The environment goes to JST-2 as painted. Each object is painted into its own crop of that
+  // panorama (the view SAM 3D sees), one object per edit, then turned into a SAM 3D asset.
   const objectsStart = Date.now();
-  const objectsJob = (deps.objects && plan.assets.length
-    ? generateObjects(layout, plan.assets, join(dir, panoName), dir, { sam3d: deps.objects.sam3d, onProgress: (m) => p('objects', m) })
-    : Promise.resolve([] as ObjectAsset[])).then((r) => { if (r.length) seconds.objects = Math.round((Date.now() - objectsStart) / 100) / 10; return r; });
+  const objectsJob = (async (): Promise<ObjectAsset[]> => {
+    if (!deps.objects || !plan.assets.length) return [];
+    p('objects', `Painting ${plan.assets.length} objects into their crops, then SAM 3D`);
+    const out = await generateObjects({ ...layout, capture: c.capture }, plan.assets, join(dir, panoName), dir, {
+      sam3d: deps.objects.sam3d,
+      paint: { guidePano: join(dir, 'blockout-full', 'shaded.png'), style: layout.style.summary, run: deps.objects.paint },
+      onProgress: (m) => p('objects', m),
+    });
+    seconds.objects = Math.round((Date.now() - objectsStart) / 100) / 10;
+    return out;
+  })();
+  // Not awaited until the environment is done; a rejection is caught there, not left unhandled.
+  objectsJob.catch(() => {});
 
   p('scale', 'Measuring how big a JST-2 unit is');
   let unitsToFloor: number | null = null;
   let scaleSource: TextSceneResult['scaleSource'] = 'provider-reconstruction';
-  // The provider's own reconstruction (JST-2 painter) is of the full panorama: same scale as the erased one.
   if (pano.probeSpz) unitsToFloor = distanceToFloor(readSpz(pano.probeSpz), [0, 0, 0], [0, -1, 0], { radius: 0.08, maxDistance: 10 });
   if (unitsToFloor === null) {
     scaleSource = 'calibration';
-    const cal = await deps.jst2.customPano({ sessionId: newSessionId('sgcal'), panorama: envPano.bytes, mime: envPano.mime, c2w: toServiceC2W(filePose), metersPerUnit: 1 });
+    const cal = await deps.jst2.customPano({ sessionId: newSessionId('sgcal'), panorama: pano.bytes, mime: pano.mime, c2w: toServiceC2W(filePose), metersPerUnit: 1 });
     credits += cal.credits ?? 0;
     const done = await deps.jst2.wait(cal, { signal: deps.signal });
     const pts = readSpz(await deps.jst2.download(done.result!.spz.url));
@@ -208,7 +217,7 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
 
   p('scene', `Building the environment at the capture point (1 unit = ${metersPerUnit} m)`);
   const sessionId = newSessionId('sg');
-  let task = await deps.jst2.customPano({ sessionId, panorama: envPano.bytes, mime: envPano.mime, c2w: toServiceC2W(filePose), metersPerUnit });
+  let task = await deps.jst2.customPano({ sessionId, panorama: pano.bytes, mime: pano.mime, c2w: toServiceC2W(filePose), metersPerUnit });
   credits += task.credits ?? 0;
   task = await deps.jst2.wait(task, { signal: deps.signal });
   const spz = await deps.jst2.download(task.result!.spz.url);
@@ -263,7 +272,7 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
     candidates,
     chosen: chosen.index,
     objects,
-    files: { depth: 'depth.png', semantic: 'semantic.png', shaded: 'shaded.png', panorama: panoName, panoramaEnv: envPano === pano ? null : 'panorama-env.png', environment: 'environment.spz', scene: 'scene.spz', layout: 'layout.json' },
+    files: { depth: 'depth.png', semantic: 'semantic.png', shaded: 'shaded.png', panorama: panoName, blockoutFull: plan.assets.length ? 'blockout-full/shaded.png' : null, environment: 'environment.spz', scene: 'scene.spz', layout: 'layout.json' },
     legend: c.legend,
     seconds,
   };

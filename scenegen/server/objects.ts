@@ -92,6 +92,15 @@ export function cropPanorama(pano: string, view: CropView, captureYaw: number, o
   });
 }
 
+/**
+ * Reject after `ms` whatever the promise does. An abort signal is not enough: a request stuck in
+ * the proxy's CONNECT ignored one (measured: 16 minutes, then "fetch failed").
+ */
+export function deadline<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  return Promise.race([work, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${what} timed out after ${Math.round(ms / 1000)} s`)), ms); })]).finally(() => clearTimeout(timer));
+}
+
 export interface Sam3dResult { ply: Uint8Array; seconds: number; requestId: string }
 
 const SAM3D_URL = 'https://queue.fal.run/fal-ai/sam-3/3d-objects';
@@ -102,32 +111,44 @@ export async function sam3d(image: Uint8Array, box: [number, number, number, num
   const f = opts.f ?? ((...a) => globalThis.fetch(...a));
   const t0 = Date.now();
   const H = { Authorization: `Key ${key}`, 'Content-Type': 'application/json' };
+  // Every request has its own deadline: a connection that stalls (seen once: 33 minutes, then
+  // "fetch failed") must fail fast so the retry can run.
+  const within = (ms: number) => (opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(ms)]) : AbortSignal.timeout(ms));
   const call = async (url: string, body?: unknown) => {
-    const r = await f(url, { method: body ? 'POST' : 'GET', headers: H, body: body ? JSON.stringify(body) : undefined, signal: opts.signal });
-    const t = await r.text();
-    if (!r.ok) throw new Error(`fal ${r.status}: ${t.slice(0, 300)}`);
+    const t = await deadline((async () => {
+      const r = await f(url, { method: body ? 'POST' : 'GET', headers: H, body: body ? JSON.stringify(body) : undefined, signal: within(60_000) });
+      const text = await r.text();
+      if (!r.ok) throw new Error(`fal ${r.status}: ${text.slice(0, 300)}`);
+      return text;
+    })(), 60_000, 'fal request');
     return JSON.parse(t) as Record<string, unknown>;
   };
   const sub = await call(SAM3D_URL, {
-    image_url: `data:image/jpeg;base64,${Buffer.from(image).toString('base64')}`,
+    image_url: `data:${image[0] === 0x89 && image[1] === 0x50 ? 'image/png' : 'image/jpeg'};base64,${Buffer.from(image).toString('base64')}`,
     box_prompts: [{ x_min: box[0], y_min: box[1], x_max: box[2], y_max: box[3], object_id: 1 }],
     seed: opts.seed ?? 42,
     export_textured_glb: false,
   });
   const status = String(sub.status_url), resultUrl = String(sub.response_url);
-  for (;;) {
+  for (let misses = 0; ;) {
     opts.signal?.throwIfAborted();
     await new Promise((r) => setTimeout(r, 3000));
-    const st = await call(status);
+    // A status poll that fails is retried; five in a row is a real failure.
+    const st = await call(status).catch((e: Error) => { if (++misses >= 5) throw e; return null; });
+    if (!st) continue;
+    misses = 0;
     if (st.status === 'COMPLETED') break;
     if (st.status !== 'IN_QUEUE' && st.status !== 'IN_PROGRESS') throw new Error(`SAM 3D ended ${String(st.status)}`);
     if (Date.now() - t0 > 12 * 60_000) throw new Error('SAM 3D did not finish within 12 minutes.');
   }
   const res = await call(resultUrl) as { gaussian_splat?: { url: string }; metadata?: unknown[] };
   if (!res.gaussian_splat?.url) throw new Error('SAM 3D found no object in the box.');
-  const dl = await f(res.gaussian_splat.url, { signal: opts.signal });
-  if (!dl.ok) throw new Error(`Downloading the SAM 3D object failed (${dl.status}).`);
-  return { ply: new Uint8Array(await dl.arrayBuffer()), seconds: (Date.now() - t0) / 1000, requestId: String(sub.request_id) };
+  const ply = await deadline((async () => {
+    const dl = await f(res.gaussian_splat!.url, { signal: within(180_000) });
+    if (!dl.ok) throw new Error(`Downloading the SAM 3D object failed (${dl.status}).`);
+    return new Uint8Array(await dl.arrayBuffer());
+  })(), 180_000, 'SAM 3D download');
+  return { ply, seconds: (Date.now() - t0) / 1000, requestId: String(sub.request_id) };
 }
 
 export async function saveJson(path: string, v: unknown): Promise<void> {
@@ -136,37 +157,31 @@ export async function saveJson(path: string, v: unknown): Promise<void> {
 
 
 /**
- * Which objects become assets and which are erased from the environment's panorama: the key
- * objects, plus anything whose panorama box mostly overlaps a key object's (a chair at its table,
- * a stool at the bar) - erasing half of such a thing would leave half of it in the room. Those
- * neighbours become assets too while there is room (`max`); beyond that they are only erased.
+ * Which objects become SAM 3D assets - the key objects and what stands on them - and so are left
+ * out of the environment's blockout altogether: the environment's panorama is painted without
+ * them, so they are never in the room twice and nothing has to be erased. Things on a key object
+ * beyond `max` are left out too (they would float where the key object was).
  */
-export function planObjects(layout: Layout, render: { width: number; height: number; obj: Int16Array }, max = 8): { assets: LayoutObject[]; erase: Set<number> } {
+export function planObjects(layout: Layout, max = 8): { assets: LayoutObject[]; remove: Set<number> } {
   const keys = keyObjects(layout, max);
-  const { width: w, height: h, obj } = render;
-  const boxOf = (id: number) => {
-    const cols = new Uint8Array(w); let y0 = h, y1 = -1;
-    for (let y = 0; y < h; y += 2) for (let x = 0; x < w; x += 2) if (obj[y * w + x] === id) { cols[x] = 1; if (y < y0) y0 = y; if (y > y1) y1 = y; }
-    return { cols, y0, y1 };
-  };
-  const idx = (o: LayoutObject) => layout.objects.indexOf(o);
-  const erase = new Set(keys.map(idx));
-  const keyBoxes = keys.map((o) => boxOf(idx(o)));
   const assets = [...keys];
-  layout.objects.forEach((o, i) => {
-    if (erase.has(i) || o.type === 'rug' || o.type === 'road' || o.type === 'water') return;
-    // Things standing on a key object go with it.
-    if (o.on && keys.some((k) => k.id === o.on)) { erase.add(i); return; }
-    const b = boxOf(i);
-    if (b.y1 < 0) return;
-    let mine = 0, shared = 0;
-    for (let x = 0; x < w; x += 2) if (b.cols[x]) { mine++; if (keyBoxes.some((k) => k.cols[x] && k.y1 >= b.y0 && k.y0 <= b.y1)) shared++; }
-    if (mine && shared / mine > 0.3) {
-      erase.add(i);
-      if (assets.length < max && o.size[1] > 0.25 && !o.on) assets.push(o);
-    }
-  });
-  return { assets, erase };
+  const remove = new Set(keys.map((o) => layout.objects.indexOf(o)));
+  // Repeat: something on something on a key object goes too.
+  for (let grew = true; grew;) {
+    grew = false;
+    layout.objects.forEach((o, i) => {
+      if (remove.has(i) || !o.on || !assets.some((k) => k.id === o.on)) return;
+      remove.add(i);
+      if (assets.length < max) assets.push(o);
+      grew = true;
+    });
+  }
+  return { assets, remove };
+}
+
+/** The layout the environment is painted from: everything but the removed objects. */
+export function environmentLayout(layout: Layout, remove: Set<number>): Layout {
+  return { ...layout, objects: layout.objects.filter((_, i) => !remove.has(i)) };
 }
 
 export interface ObjectAsset {
@@ -184,9 +199,11 @@ export interface ObjectAsset {
   error: string | null;
 }
 
-/** Every asset object: crop the panorama at it, SAM 3D, thin, fit to the blockout, write objects/<id>.spz. */
+/** Every asset object: crop the object panorama at it, SAM 3D, thin, fit to the blockout, write objects/<id>.spz. */
 export async function generateObjects(layout: Layout, assets: LayoutObject[], panoPath: string, dir: string, deps: {
   sam3d: (image: Uint8Array, box: [number, number, number, number]) => Promise<{ ply: Uint8Array; seconds: number }>;
+  /** When the panorama does not show the objects (the environment's): paint each into its own crop, guided by `guidePano` (the full blockout's clay render). */
+  paint?: { guidePano: string; style?: string; run: (input: { image: Uint8Array; guide: Uint8Array; size: number; box: [number, number, number, number]; label: string; style?: string }) => Promise<Uint8Array> };
   maxGaussians?: number;
   onProgress?: (message: string) => void;
 }): Promise<ObjectAsset[]> {
@@ -199,11 +216,18 @@ export async function generateObjects(layout: Layout, assets: LayoutObject[], pa
   let done = 0;
   return Promise.all(assets.map(async (o): Promise<ObjectAsset> => {
     const view = cropFor(o, capture);
-    const crop = `objects/${o.id}-crop.jpg`;
+    const crop = `objects/${o.id}-crop.${deps.paint ? 'png' : 'jpg'}`;
     const base = { id: o.id, label: o.label, crop, box: view.box };
     try {
-      await cropPanorama(panoPath, view, capture.yaw, join(dir, crop));
-      const r = await deps.sam3d(new Uint8Array(await readFile(join(dir, crop))), view.box);
+      if (deps.paint) {
+        const envCrop = join(dir, `objects/${o.id}-env.jpg`), guideCrop = join(dir, `objects/${o.id}-guide.jpg`);
+        await Promise.all([cropPanorama(panoPath, view, capture.yaw, envCrop), cropPanorama(deps.paint.guidePano, view, capture.yaw, guideCrop)]);
+        const painted = await deps.paint.run({ image: new Uint8Array(await readFile(envCrop)), guide: new Uint8Array(await readFile(guideCrop)), size: view.size, box: view.box, label: o.label, style: deps.paint.style });
+        await wf(join(dir, crop), painted);
+      } else await cropPanorama(panoPath, view, capture.yaw, join(dir, crop));
+      // One retry: SAM 3D on fal fails now and then on the network, rarely twice.
+      const image = new Uint8Array(await readFile(join(dir, crop)));
+      const r = await deps.sam3d(image, view.box).catch((e: Error) => { deps.onProgress?.(`${o.label}: SAM 3D failed (${e.message}), retrying`); return deps.sam3d(image, view.box); });
       const g = thinGaussians(readPlyGaussians(r.ply), deps.maxGaussians ?? 150_000);
       const fit = fitToBlockout(g, o, view.pose, capture.position);
       const file = `objects/${o.id}.spz`;

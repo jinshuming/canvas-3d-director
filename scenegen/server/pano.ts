@@ -205,46 +205,44 @@ export function peopleCheck(cfg: { apiKey?: string; base?: string; model: string
 }
 
 /**
- * The environment's panorama: the same panorama with the key objects taken out (they become
- * their own 3D assets), painted by GPT-image-2 as an edit under a mask - transparent where the
- * objects stand (from the blockout's object-id render, grown a little and down to the floor for
- * contact shadows), opaque everywhere else so the rest stays as it was.
+ * Paint ONE object into its crop of the environment's panorama - the perspective view SAM 3D will
+ * see. `box` is the object's blockout box projected into the crop; the edit is masked to it (with a
+ * margin, more below for the contact shadow) and composited strictly, so the rest is the
+ * environment's own pixels. `guide` is the same view of the full blockout's clay render: where the
+ * object stands and how big it is. One object per edit: given several at once the model swaps them.
  */
-export async function eraseObjects(cfg: { apiKey?: string; base?: string; model?: string }, input: { pano: Uint8Array; mask: { rgba: Uint8Array; width: number; height: number }; labels: string[]; signal?: AbortSignal }, f: typeof fetch = (...a) => globalThis.fetch(...a)): Promise<Uint8Array> {
+export async function paintObject(cfg: { apiKey?: string; base?: string; model?: string }, input: { image: Uint8Array; guide: Uint8Array; size: number; box: [number, number, number, number]; label: string; style?: string; signal?: AbortSignal }, f: typeof fetch = (...a) => globalThis.fetch(...a)): Promise<Uint8Array> {
   if (!cfg.apiKey) throw new Error('OPENAI_API_KEY is not set.');
-  // An object split by the panorama's seam (half at each edge) is left half-erased: turn the
-  // panorama so the seam falls in the widest stretch with nothing to erase, and back afterwards.
-  const { rgba, width: W, height: H } = input.mask;
-  const shift = seamShift(rgba, W, H);
-  const rolledMask = new Uint8Array(rgba.length);
-  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) rolledMask.set(rgba.subarray((y * W + ((x + shift) % W)) * 4, (y * W + ((x + shift) % W)) * 4 + 4), (y * W + x) * 4);
-  const panoW = W; // the panorama is rendered at the mask's size
-  const [image, mask] = await Promise.all([
-    rollImage(input.pano, Math.round((shift / W) * panoW)).then((b) => resizeImage(b, 1536, 1024, 'png')),
-    resizeImage(encodePng(rolledMask, W, H, 4), 1536, 1024, 'png'),
-  ]);
+  const S = input.size;
+  const [x0, y0, x1, y1] = input.box;
+  const mx = (x1 - x0) * 0.15 + 8, my = (y1 - y0) * 0.15 + 8;
+  const bx0 = Math.max(0, Math.floor(x0 - mx)), bx1 = Math.min(S - 1, Math.ceil(x1 + mx));
+  const by0 = Math.max(0, Math.floor(y0 - my)), by1 = Math.min(S - 1, Math.ceil(y1 + my * 2));
+  const rgba = new Uint8Array(S * S * 4).fill(255);
+  for (let y = by0; y <= by1; y++) for (let x = bx0; x <= bx1; x++) rgba[(y * S + x) * 4 + 3] = 0;
+  const [image, guide] = await Promise.all([resizeImage(input.image, S, S, 'png'), resizeImage(input.guide, S, S, 'png')]);
   const form = new FormData();
   form.append('model', cfg.model ?? 'gpt-image-2');
-  form.append('size', '1536x1024');
+  form.append('size', `${S}x${S}`);
   form.append('n', '1');
   form.append('prompt', [
-    'This is a 360° equirectangular panorama (horizontally squeezed). In the transparent areas of the mask, REMOVE these objects completely:',
-    input.labels.map((l) => `- ${l}`).join('\n'),
-    'Fill each area with what is behind it - the floor, the walls, the ground, the room continuing naturally - in the same materials, light and perspective, with no shadows of the removed objects. Leave everything outside the transparent areas exactly as it is. Do not add new objects, people or text.',
+    'The first image is a photo of a place. The second is a clay blockout of the SAME view, pixel-aligned: the grey blocks show where things stand and how big they are.',
+    `In the transparent area of the mask, ADD: ${input.label}. Exactly where and as big as its block in the clay image, facing the way the block faces, standing on the floor (or on what its block stands on).`,
+    `Photoreal and complete, in the photo's light and perspective${input.style ? `, ${input.style}` : ''}, with a natural contact shadow. Only this one object; keep everything outside the transparent area exactly as it is. No people, no text.`,
   ].join('\n'));
-  form.append('image', new Blob([image as BlobPart], { type: 'image/png' }), 'panorama.png');
-  form.append('mask', new Blob([mask as BlobPart], { type: 'image/png' }), 'mask.png');
+  form.append('image[]', new Blob([image as BlobPart], { type: 'image/png' }), 'photo.png');
+  form.append('image[]', new Blob([guide as BlobPart], { type: 'image/png' }), 'blockout.png');
+  form.append('mask', new Blob([encodePng(rgba, S, S, 4) as BlobPart], { type: 'image/png' }), 'mask.png');
   const res = await f(`${(cfg.base ?? 'https://api.openai.com/v1').replace(/\/$/, '')}/images/edits`, { method: 'POST', signal: input.signal, headers: { Authorization: `Bearer ${cfg.apiKey}` }, body: form });
   const body = await res.json().catch(() => null) as { data?: Array<{ b64_json?: string; url?: string }>; error?: { message?: string } } | null;
   if (!res.ok) throw new Error(`OpenAI image edit ${res.status}: ${body?.error?.message ?? 'failed'}`);
   const item = body?.data?.[0];
   const bytes = item?.b64_json ? new Uint8Array(Buffer.from(item.b64_json, 'base64')) : item?.url ? new Uint8Array(await (await f(item.url)).arrayBuffer()) : null;
   if (!bytes) throw new Error('OpenAI returned no image.');
-  const edited = await rollImage(await resizeImage(bytes, W, H, 'png'), W - shift);
   // The model repaints the whole frame; keep its pixels only under the mask (feathered), the original elsewhere.
-  const alpha = new Uint8Array(W * H);
-  for (let i = 0; i < W * H; i++) alpha[i] = rgba[i * 4 + 3]! < 128 ? 255 : 0;
-  return composite(input.pano, edited, encodePng(feather(alpha, W, H, 6), W, H, 1), W, H);
+  const alpha = new Uint8Array(S * S);
+  for (let i = 0; i < S * S; i++) alpha[i] = rgba[i * 4 + 3]! < 128 ? 255 : 0;
+  return composite(image, await resizeImage(bytes, S, S, 'png'), encodePng(feather(alpha, S, S, 6), S, S, 1), S, S);
 }
 
 /** Box-blur a 0/255 mask `r` px (twice, so the edge is smooth), wrapping columns. */
@@ -280,34 +278,3 @@ async function composite(base: Uint8Array, top: Uint8Array, alphaPng: Uint8Array
   } finally { await rm(dir, { recursive: true, force: true }); }
 }
 
-/** The column to put at the left edge: the middle of the widest run of columns with nothing masked. */
-export function seamShift(rgba: Uint8Array, w: number, h: number): number {
-  const used = new Uint8Array(w);
-  for (let x = 0; x < w; x++) for (let y = 0; y < h; y++) if (rgba[(y * w + x) * 4 + 3]! < 128) { used[x] = 1; break; }
-  if (!used.some(Boolean)) return 0;
-  let best = 0, bestLen = -1;
-  for (let x = 0; x < w; x++) {
-    if (used[x] || !used[(x - 1 + w) % w]) continue;
-    let len = 0;
-    while (len < w && !used[(x + len) % w]) len++;
-    if (len > bestLen) { bestLen = len; best = (x + Math.floor(len / 2)) % w; }
-  }
-  return best;
-}
-
-/** Turn an equirect image left by `shift` pixels (columns wrap around). */
-export async function rollImage(bytes: Uint8Array, shift: number): Promise<Uint8Array> {
-  if (!shift) return bytes;
-  const { spawn } = await import('node:child_process');
-  return await new Promise((resolve, reject) => {
-    const fc = `[0]split[a][b];[a]crop=iw-${shift}:ih:${shift}:0[r];[b]crop=${shift}:ih:0:0[l];[r][l]hstack`;
-    const p = spawn('ffmpeg', ['-v', 'error', '-i', 'pipe:0', '-filter_complex', fc, '-f', 'image2pipe', '-vcodec', 'png', 'pipe:1']);
-    const out: Buffer[] = [];
-    let err = '';
-    p.stdout.on('data', (c: Buffer) => out.push(c));
-    p.stderr.on('data', (c: Buffer) => { err += c.toString(); });
-    p.on('error', reject);
-    p.on('close', (code) => (code === 0 ? resolve(new Uint8Array(Buffer.concat(out))) : reject(new Error(`ffmpeg roll failed: ${err.slice(0, 200)}`))));
-    p.stdin.end(Buffer.from(bytes));
-  });
-}
