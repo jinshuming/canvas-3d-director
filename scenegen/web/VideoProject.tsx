@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react';
 
 import { api, file } from './api.ts';
+import { SplatViewer } from './SplatViewer.tsx';
 import type { Config, Job, Project } from './api.ts';
 
 interface Views { stats: Record<string, unknown> & { seconds?: Record<string, number> }; frame: { scale: string; floorY?: number }; views: Array<{ index: number; file: string; frameTime: number; width: number; height: number; c2w: number[][]; intrinsic: number[] }> }
@@ -66,6 +67,7 @@ export function VideoProject({ project, config, onChanged }: { project: Project;
             <span>重投影误差 <b>{Number(views.stats.reprojErrorPx).toFixed(2)} px</b></span>
             <span>尺度 <b>{views.frame.scale === 'floor' ? '按地面（相机高 1.5 m）' : '估计'}</b></span>
           </div>
+          {r && <div className="video-scene"><SplatViewer url={file(project.id, 'out/scene.spz', job?.endedAt)} /><p className="muted small">posed-images 是模拟接口时，这里是 COLMAP 稀疏点云的预览；接口上线后就是 JST-2 的重建。</p></div>}
           <CameraPath views={views.views} />
           <div className="frames">{views.views.map((v) => <figure key={v.index}><img src={file(project.id, `out/bundle/${v.file}`)} alt="" loading="lazy" /><figcaption>{v.frameTime.toFixed(1)}s</figcaption></figure>)}</div>
           {r && <div className="result">

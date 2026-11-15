@@ -87,9 +87,11 @@ test('agent tools: build a room, place by relation, check, choose the capture po
     { type: 'coffee table', id: 'table', label: 'oak table', in_front_of: 'sofa' },
     { type: 'lamp', id: 'lamp', label: 'brass lamp', right_of: 'sofa', gap: 0.1 },
     { type: 'tv', id: 'tv', label: 'tv', on: 'nothing_here' },
+    { type: 'box', id: 'android', label: 'tall humanoid android seen from behind' },
   ] }, host);
   assert.match(placed.text, /sofa: sofa at/);
   assert.match(placed.text, /tv: FAILED - No object "nothing_here"/);
+  assert.match(placed.text, /android: REFUSED - the scene is an empty place/);
   assert.equal(layout.objects.length, 3);
   assert.equal(layout.objects[0]!.type, 'sofa');
   assert.match((await runTool('check_layout', {}, host)).text, /No problems/);

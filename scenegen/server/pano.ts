@@ -169,7 +169,7 @@ export function falFluxDepthProvider(key: string | undefined, f: typeof fetch = 
   };
 }
 
-export type PeopleCheck = (pano: Uint8Array) => Promise<{ people: boolean; note: string }>;
+export type PeopleCheck = (pano: Uint8Array) => Promise<{ people: boolean; prominent: boolean; note: string }>;
 
 /** Ask a vision model whether a panorama shows people (or characters, robots, animals). */
 export function peopleCheck(cfg: { apiKey?: string; base?: string; model: string }, f: typeof fetch = (...a) => globalThis.fetch(...a)): PeopleCheck | undefined {
@@ -182,7 +182,7 @@ export function peopleCheck(cfg: { apiKey?: string; base?: string; model: string
       body: JSON.stringify({
         model: cfg.model,
         input: [{ role: 'user', content: [
-          { type: 'input_text', text: 'This is a 360° equirectangular panorama of a place. Does it show any person, character, figure, statue of a person, robot, mannequin or animal? Answer with JSON only: {"people": true|false, "note": "what and where, or empty"}.' },
+          { type: 'input_text', text: 'This is a 360° equirectangular panorama of a place. Does it show any person, character, robot, mannequin or animal? "prominent" is true only for one standing or sitting in the space at life size (something a viewer would read as a figure in the room); small decor - figurines, statuettes, toys, pictures or posters - is not prominent. Answer with JSON only: {"people": true|false, "prominent": true|false, "note": "what and where, or empty"}.' },
           { type: 'input_image', image_url: `data:image/jpeg;base64,${Buffer.from(small).toString('base64')}` },
         ] }],
         text: { format: { type: 'json_object' } },
@@ -191,7 +191,7 @@ export function peopleCheck(cfg: { apiKey?: string; base?: string; model: string
     const body = await res.json().catch(() => null) as { output?: Array<{ type: string; content?: Array<{ type: string; text?: string }> }>; error?: { message?: string } } | null;
     if (!res.ok) throw new Error(body?.error?.message ?? `vision ${res.status}`);
     const text = body?.output?.flatMap((o) => o.content ?? []).find((c) => c.type === 'output_text')?.text ?? '{}';
-    const j = JSON.parse(text) as { people?: boolean; note?: string };
-    return { people: Boolean(j.people), note: String(j.note ?? '') };
+    const j = JSON.parse(text) as { people?: boolean; prominent?: boolean; note?: string };
+    return { people: Boolean(j.people), prominent: Boolean(j.people && j.prominent), note: String(j.note ?? '') };
   };
 }

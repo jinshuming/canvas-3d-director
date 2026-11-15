@@ -9,6 +9,7 @@ import { checkLayout } from '../core/layout.ts';
 import type { Layout } from '../core/types.ts';
 import { api, file, toDataUrl } from './api.ts';
 import type { Conditions, Config, Job, Project } from './api.ts';
+import { SplatViewer } from './SplatViewer.tsx';
 import { Viewport } from './Viewport.tsx';
 
 interface ChatState { items: ChatItem[]; previousId: string | null }
@@ -22,7 +23,7 @@ export function TextProject({ project, config, onChanged }: { project: Project; 
   const [draft, setDraft] = useState('');
   const [picture, setPicture] = useState<{ blob: Blob; url: string; video?: boolean } | null>(null);
   const [cond, setCond] = useState<Conditions | null>(null);
-  const [tab, setTab] = useState<'shaded' | 'depth' | 'semantic' | 'pano'>('shaded');
+  const [tab, setTab] = useState<'shaded' | 'depth' | 'semantic' | 'pano' | 'scene'>(project.result ? 'scene' : 'shaded');
   const [selected, setSelected] = useState<string | null>(null);
   const [job, setJob] = useState<Job | null>(project.job ?? null);
   const [result, setResult] = useState(project.result ?? null);
@@ -54,7 +55,7 @@ export function TextProject({ project, config, onChanged }: { project: Project; 
     const t = window.setInterval(async () => {
       const p = await api.get(project.id);
       setJob(p.job ?? null);
-      if (p.job?.status !== 'running') { setResult(p.result ?? null); setExported(p.exported ?? null); setTab('pano'); onChanged(); }
+      if (p.job?.status !== 'running') { setResult(p.result ?? null); setExported(p.exported ?? null); setTab('scene'); onChanged(); }
     }, 1500);
     return () => window.clearInterval(t);
   }, [job?.status, project.id, onChanged]);
@@ -165,12 +166,12 @@ export function TextProject({ project, config, onChanged }: { project: Project; 
         </div>
         <Viewport layout={layout} capture={cond?.capture ?? layout.capture} selected={selected} onSelect={setSelected} />
         <div className="tabs">
-          {(['shaded', 'depth', 'semantic', 'pano'] as const).map((t) => <button key={t} className={tab === t ? 'on' : ''} onClick={() => setTab(t)} disabled={t === 'pano' ? !r : !cond}>{{ shaded: '白模全景', depth: '等距深度图', semantic: '语义图', pano: '生成的全景图' }[t]}</button>)}
+          {(['shaded', 'depth', 'semantic', 'pano', 'scene'] as const).map((t) => <button key={t} className={tab === t ? 'on' : ''} onClick={() => setTab(t)} disabled={t === 'pano' || t === 'scene' ? !r : !cond}>{{ shaded: '白模全景', depth: '等距深度图', semantic: '语义图', pano: '生成的全景图', scene: '3D 场景' }[t]}</button>)}
           <span className="grow" />
           <button onClick={() => void refreshConditions()} disabled={!layout.objects.length}>重新渲染</button>
         </div>
-        <div className="pano">
-          {tab === 'pano' && r ? <img src={file(project.id, `out/${r.files.panorama}`, stamp)} alt="" /> : cond ? <img src={cond.files[tab === 'pano' ? 'shaded' : tab]} alt="" /> : <div className="empty">摆好白模后在这里看到全景条件图</div>}
+        <div className={`pano${tab === 'scene' ? ' tall' : ''}`}>
+          {tab === 'scene' && r ? <SplatViewer url={file(project.id, `out/${r.files.scene}`, stamp)} yaw={(r as unknown as { capture: { yaw: number } }).capture.yaw} /> : tab === 'pano' && r ? <img src={file(project.id, `out/${r.files.panorama}`, stamp)} alt="" /> : cond ? <img src={cond.files[tab === 'pano' || tab === 'scene' ? 'shaded' : tab]} alt="" /> : <div className="empty">摆好白模后在这里看到全景条件图</div>}
         </div>
       </section>
 
