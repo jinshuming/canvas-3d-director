@@ -78,7 +78,12 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
   p('conditions', 'Finding the capture point and rendering the blockout');
   const c = await renderConditions(layout, dir);
   const prompt = deps.prompt ?? compileCaption(layout, c.capture);
-  await writeFile(join(dir, 'layout.json'), JSON.stringify({ ...layout, capture: c.capture }, null, 2));
+  // THE SCENE FILE'S FRAME: the capture point at the origin, metres, +Y up (the floor at y = -1.5) -
+  // what the director assumes of every generated scene (its placement, gap check and fill measure from
+  // the file's origin). The blockout is the same frame shifted by the capture point; the layout file says so.
+  const filePose: CameraPose = { position: [0, 0, 0], yaw: c.capture.yaw };
+  const origin = c.capture.position;
+  await writeFile(join(dir, 'layout.json'), JSON.stringify({ ...layout, capture: c.capture, sceneFrame: { origin, note: 'The .spz origin is the capture point `origin` of this layout (metres, +Y up). A layout point p is at p - origin in the file; in the director (which puts the capture point at x = z = 0, floor y = 0) it is at [p.x - origin.x, p.y, p.z - origin.z].' } }, null, 2));
   await writeFile(join(dir, 'prompt.txt'), prompt);
   lap('conditions');
 
@@ -98,11 +103,11 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
   }
   if (unitsToFloor === null) {
     scaleSource = 'calibration';
-    const cal = await deps.jst2.customPano({ sessionId: newSessionId('sgcal'), panorama: pano.bytes, mime: pano.mime, c2w: toServiceC2W(c.capture), metersPerUnit: 1 });
+    const cal = await deps.jst2.customPano({ sessionId: newSessionId('sgcal'), panorama: pano.bytes, mime: pano.mime, c2w: toServiceC2W(filePose), metersPerUnit: 1 });
     credits += cal.credits ?? 0;
     const done = await deps.jst2.wait(cal, { signal: deps.signal });
     const pts = readSpz(await deps.jst2.download(done.result!.spz.url));
-    unitsToFloor = distanceToFloor(pts, c.capture.position, [0, -1, 0], { radius: 0.08, maxDistance: 10 });
+    unitsToFloor = distanceToFloor(pts, [0, 0, 0], [0, -1, 0], { radius: 0.08, maxDistance: 10 });
   }
   if (unitsToFloor === null || !(unitsToFloor > 0)) throw new Error('Could not find the floor under the capture point in the reconstruction.');
   const metersPerUnit = Math.round((EYE_HEIGHT / unitsToFloor) * 1000) / 1000;
@@ -110,7 +115,7 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
 
   p('scene', `Building the scene at the capture point (1 unit = ${metersPerUnit} m)`);
   const sessionId = newSessionId('sg');
-  let task = await deps.jst2.customPano({ sessionId, panorama: pano.bytes, mime: pano.mime, c2w: toServiceC2W(c.capture), metersPerUnit });
+  let task = await deps.jst2.customPano({ sessionId, panorama: pano.bytes, mime: pano.mime, c2w: toServiceC2W(filePose), metersPerUnit });
   credits += task.credits ?? 0;
   task = await deps.jst2.wait(task, { signal: deps.signal });
   const spz = await deps.jst2.download(task.result!.spz.url);
@@ -122,7 +127,7 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
   let fill: FillResult | null = null;
   if ((deps.maxFills ?? 2) > 0) {
     p('fill', 'Looking for gaps in the scene');
-    const f = await autoFill(spz, dir, { jst2: deps.jst2, sessionId, batchIds, capture: c.capture.position, maxFills: deps.maxFills ?? 2, signal: deps.signal, onProgress: (m) => p('fill', m) });
+    const f = await autoFill(spz, dir, { jst2: deps.jst2, sessionId, batchIds, capture: [0, 0, 0], maxFills: deps.maxFills ?? 2, signal: deps.signal, onProgress: (m) => p('fill', m) });
     fill = f.result;
     credits += f.result.credits;
     batchIds = f.result.batchIds;
@@ -133,7 +138,9 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
 
   p('verify', 'Checking the scene against the blockout');
   const lowRes = renderEquirect(buildScene(layout), c.capture, 256, 128);
-  const alignment = measureAlignment(readSpz(finalSpz), lowRes, c.capture);
+  // Blockout rendered at the capture point, splats seen from the file's origin: the same rays.
+  const measured = measureAlignment(readSpz(finalSpz), lowRes, filePose);
+  const alignment = { ...measured, floorY: measured.floorY === null ? null : Math.round((measured.floorY + origin[1]) * 100) / 100 };
   lap('verify');
 
   const result: TextSceneResult = {

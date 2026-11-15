@@ -88,10 +88,13 @@ const MIME: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg'
 export function scenegenServer(opts: ScenegenOptions): Plugin {
   const root = join(opts.dataDir, 'scenegen');
   const projectsDir = join(root, 'projects');
-  const base = () => `http://127.0.0.1:${opts.port}`;
+  // This server's own origin, for the export (director route) and the mock's file URLs. Read off the
+  // listening socket: Vite may bind IPv6 localhost only, where 127.0.0.1 is refused.
+  let origin = `http://localhost:${opts.port}`;
+  const base = () => origin;
   const mock = createMockJst2(join(root, 'mock-jst2'), base);
   const endpoint: 'mock' | 'live' = opts.posedImagesBase ? 'live' : 'mock';
-  const jst2 = new Jst2Client({ apiKey: opts.viggleKey, base: opts.viggleBase, posedImagesBase: opts.posedImagesBase ?? `${base()}${MOCK_PREFIX}` });
+  const jst2 = new Jst2Client({ apiKey: opts.viggleKey, base: opts.viggleBase, posedImagesBase: () => opts.posedImagesBase ?? `${base()}${MOCK_PREFIX}` });
   // First available is the default: GPT-image-2 from the depth map (the planned route), then JST-2's own painter.
   const providers: PanoProvider[] = [
     openaiImageProvider({ apiKey: opts.openai?.apiKey, base: opts.openai?.base, model: opts.imageModel ?? 'gpt-image-2' }),
@@ -348,6 +351,16 @@ export function scenegenServer(opts: ScenegenOptions): Plugin {
   return {
     name: 'scenegen-server',
     configureServer(server) {
+      server.httpServer?.once('listening', () => {
+        const a = server.httpServer?.address();
+        if (a && typeof a === 'object') {
+          // Loopback and wildcard binds go by name: NO_PROXY lists "localhost", not "[::1]", and the
+          // dev server runs with HTTPS_PROXY set (see .claude/launch.json).
+          const loop = ['::', '0.0.0.0', '::1', '127.0.0.1'].includes(a.address);
+          const host = loop ? 'localhost' : a.family === 'IPv6' ? `[${a.address}]` : a.address;
+          origin = `http://${host}:${a.port}`;
+        }
+      });
       server.middlewares.use((req, res, next) => {
         const u = req.url ?? '';
         if (u === '/scenegen' || u === '/scenegen/') { res.writeHead(302, { Location: '/scenegen/index.html' }); res.end(); return; }
