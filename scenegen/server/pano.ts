@@ -24,6 +24,8 @@ export interface PanoInput {
   geometry?: string;
   /** The user's input picture, if the scene came from one: the look to match. */
   styleImage?: { bytes: Uint8Array; mime: string };
+  /** Also send the clay render (pixel-aligned with the depth map) as a structure reference. */
+  withClay?: boolean;
   signal?: AbortSignal;
   onProgress?: (message: string) => void;
 }
@@ -92,9 +94,13 @@ export function openaiImageProvider(cfg: { apiKey?: string; base?: string; model
       form.append('model', model);
       form.append('size', size);
       form.append('n', '1');
-      form.append('prompt', depthPrompt(input.prompt, Boolean(input.styleImage), input.geometry));
+      form.append('prompt', depthPrompt(input.prompt, Boolean(input.styleImage), input.geometry, Boolean(input.withClay)));
       const depth = w / h === 2 ? input.depth : await resizeImage(input.depth, w, h, 'png');
       form.append('image[]', new Blob([depth as BlobPart], { type: 'image/png' }), 'depth-equirect.png');
+      if (input.withClay) {
+        const clay = w / h === 2 ? input.shaded : await resizeImage(input.shaded, w, h, 'png');
+        form.append('image[]', new Blob([clay as BlobPart], { type: 'image/png' }), 'clay-equirect.png');
+      }
       if (input.styleImage) form.append('image[]', new Blob([input.styleImage.bytes as BlobPart], { type: input.styleImage.mime }), 'style-reference.png');
       const res = await f(`${(cfg.base ?? 'https://api.openai.com/v1').replace(/\/$/, '')}/images/edits`, { method: 'POST', signal: input.signal, headers: { Authorization: `Bearer ${cfg.apiKey}` }, body: form });
       const body = await res.json().catch(() => null) as { data?: Array<{ b64_json?: string; url?: string }>; error?: { message?: string } } | null;
@@ -111,13 +117,14 @@ export function openaiImageProvider(cfg: { apiKey?: string; base?: string; model
   };
 }
 
-export function depthPrompt(caption: string, withStyle: boolean, geometry?: string): string {
+export function depthPrompt(caption: string, withStyle: boolean, geometry?: string, withClay = false): string {
   return [
     'The first reference image is an EQUIRECTANGULAR DEPTH MAP of a 3D layout, seen from one point: brighter = nearer, black = no surface (open sky, or the view out through a window or door).',
+    withClay ? 'The second reference image is a clay render of the SAME layout from the SAME point, pixel for pixel aligned with the depth map: each flat-coloured shape is one object, outlined in dark lines. Its colours are only labels - take the outlines and positions from it, never its colours or its grey look.' : '',
     'Paint a photorealistic 360° equirectangular panorama of exactly that space from exactly that point: every wall, opening, piece of furniture and object where the depth map has it, at the same size and distance, with the same horizon and the same distortion toward the top and bottom. Do not add large objects the depth map does not have; small decor is fine.',
     'Keep the room the size the depth map shows: the walls and the ceiling stay exactly where it puts them. Do not make the room taller, deeper or wider, do not vault or raise the ceiling, and do not open up walls that are solid in the depth map.',
     geometry ? `Measurements: ${geometry}.` : '',
-    withStyle ? 'The second reference image shows the look to match: its materials, colours and light - not its layout, and not any people, characters or creatures in it.' : '',
+    withStyle ? `The ${withClay ? 'third' : 'second'} reference image shows the look to match: its materials, colours and light - not its layout, and not any people, characters or creatures in it.` : '',
     'No people, characters, figures, robots, mannequins or animals anywhere in the panorama.',
     'The left and right edges must join seamlessly.',
     caption,
