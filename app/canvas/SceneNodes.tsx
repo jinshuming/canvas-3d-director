@@ -95,7 +95,7 @@ export function SceneGenCard({ node, inputs, onPatch, onSendToWorld }: Props) {
   const [err, setErr] = useState<string | null>(null);
   const job = project?.job;
   const running = Boolean(local && local.phase !== 'done' && local.phase !== 'failed') || job?.status === 'running';
-  const result = project?.result as { files?: { panorama?: string }; alignment?: { floorY: number | null; objectsWithin25: number }; fill?: { after?: { worstHole: number } } | null; credits?: number } | null | undefined;
+  const result = project?.result as { objects?: Array<{ file: string | null }>; files?: { panorama?: string }; alignment?: { floorY: number | null; objectsWithin25: number }; fill?: { after?: { worstHole: number } } | null; credits?: number } | null | undefined;
   const linkedImage = !media && inputs.imageSrc;
   const prompt = [inputs.text, text].filter((t) => t.trim()).join('\n');
 
@@ -123,7 +123,7 @@ export function SceneGenCard({ node, inputs, onPatch, onSendToWorld }: Props) {
           <div className="cv-world-shade" />
           <div className="cv-sg-cover-info">
             <strong>{project!.title}</strong>
-            <small>{project!.layout.objects.length} 个物体 · 白模深度一致 {Math.round((result!.alignment?.objectsWithin25 ?? 0) * 100)}% · 最大空洞 {Math.round((result!.fill?.after?.worstHole ?? 0) * 100)}% · {result!.credits ?? 0} 额度</small>
+            <small>{project!.layout.objects.length} 个物体{result!.objects?.length ? `（${result!.objects.filter((o) => o.file).length} 个 SAM 3D）` : ''} · 白模深度一致 {Math.round((result!.alignment?.objectsWithin25 ?? 0) * 100)}% · 最大空洞 {Math.round((result!.fill?.after?.worstHole ?? 0) * 100)}% · {result!.credits ?? 0} 额度</small>
           </div>
         </div>
       ) : (

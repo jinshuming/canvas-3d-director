@@ -18,12 +18,15 @@ import { findCapturePoint } from '../core/capture.ts';
 import { toServiceC2W } from '../core/frame.ts';
 import type { CameraPose } from '../core/frame.ts';
 import { buildScene } from '../core/geometry.ts';
-import { depthImage, depthRange, renderEquirect, semanticImage, shadedImage } from '../core/render.ts';
+import { concatGaussians, readSpzGaussians, writeSpzGaussians } from '../core/gaussians.ts';
+import { depthImage, depthRange, objectMask, renderEquirect, semanticImage, shadedImage } from '../core/render.ts';
 import { distanceToFloor, readSpz } from '../core/spz.ts';
 import type { Layout } from '../core/types.ts';
 import { EYE_HEIGHT } from '../core/types.ts';
 import { scorePanoramas } from './alignScore.ts';
 import { autoFill, fillBudget } from './fill.ts';
+import { generateObjects, planObjects } from './objects.ts';
+import type { ObjectAsset } from './objects.ts';
 import type { FillResult } from './fill.ts';
 import { Jst2Client, newSessionId } from './jst2.ts';
 import type { PanoProvider, PeopleCheck } from './pano.ts';
@@ -48,14 +51,16 @@ export interface TextSceneResult {
   /** Every panorama painted, its alignment with the blockout and its figure check; `chosen` is the one kept. */
   candidates: PanoCandidate[];
   chosen: number;
-  files: { depth: string; semantic: string; shaded: string; panorama: string; scene: string; layout: string };
+  /** Key objects generated as their own assets (SAM 3D), fitted to the blockout; empty when objects are off. */
+  objects: ObjectAsset[];
+  files: { depth: string; semantic: string; shaded: string; panorama: string; panoramaEnv: string | null; environment: string; scene: string; layout: string };
   legend: Array<{ cls: string; color: [number, number, number]; share: number }>;
   seconds: Record<string, number>;
 }
 
 export interface PanoCandidate { file: string; objects: number | null; shell: number | null; people: { people: boolean; prominent: boolean; note: string } | null }
 
-export type Progress = (stage: 'conditions' | 'pano' | 'scale' | 'scene' | 'fill' | 'verify' | 'done', message: string) => void;
+export type Progress = (stage: 'conditions' | 'pano' | 'scale' | 'scene' | 'fill' | 'objects' | 'verify' | 'done', message: string) => void;
 
 const W = 2048, H = 1024;
 
@@ -94,7 +99,9 @@ export async function renderConditions(layout: Layout, dir: string) {
   return { capture, buffers: r, range, legend: sem.legend, depth, semantic, shaded };
 }
 
-export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst2Client; provider: PanoProvider; prompt?: string; styleImage?: { bytes: Uint8Array; mime: string }; maxFills?: number | 'auto'; vision?: PeopleCheck; candidates?: number; signal?: AbortSignal; onProgress?: Progress }): Promise<TextSceneResult> {
+export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst2Client; provider: PanoProvider; prompt?: string; styleImage?: { bytes: Uint8Array; mime: string }; maxFills?: number | 'auto'; vision?: PeopleCheck; candidates?: number;
+  /** Generate key objects separately (SAM 3D) and the environment without them. Off: one 3DGS of everything. */
+  objects?: { sam3d: (image: Uint8Array, box: [number, number, number, number]) => Promise<{ ply: Uint8Array; seconds: number }>; erase: (input: { pano: Uint8Array; mask: { rgba: Uint8Array; width: number; height: number }; labels: string[] }) => Promise<Uint8Array> }; signal?: AbortSignal; onProgress?: Progress }): Promise<TextSceneResult> {
   const p = deps.onProgress ?? (() => {});
   const seconds: Record<string, number> = {};
   let t = Date.now();
@@ -164,16 +171,32 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
   await writeFile(join(dir, panoName), pano.bytes);
   lap('pano');
 
+  // ── Objects and environment, side by side ─────────────────────────────────
+  // Key objects (and what crowds them) become SAM 3D assets cut from THIS panorama; the environment
+  // is rebuilt from the same panorama with them erased, so nothing is in the room twice.
+  const plan = deps.objects ? planObjects(layout, c.buffers) : { assets: [], erase: new Set<number>() };
+  let envPano = pano;
+  if (deps.objects && plan.erase.size) {
+    p('pano', `Erasing ${plan.erase.size} objects from the environment's panorama`);
+    const bytes = await deps.objects.erase({ pano: pano.bytes, mask: { rgba: objectMask(c.buffers, plan.erase), width: c.buffers.width, height: c.buffers.height }, labels: [...plan.erase].map((i) => layout.objects[i]!.label) });
+    envPano = { bytes, mime: 'image/png' };
+    await writeFile(join(dir, 'panorama-env.png'), bytes);
+    lap('erase');
+  }
+  // Runs beside the environment: its own wall time, not a lap of the sequence.
+  const objectsStart = Date.now();
+  const objectsJob = (deps.objects && plan.assets.length
+    ? generateObjects(layout, plan.assets, join(dir, panoName), dir, { sam3d: deps.objects.sam3d, onProgress: (m) => p('objects', m) })
+    : Promise.resolve([] as ObjectAsset[])).then((r) => { if (r.length) seconds.objects = Math.round((Date.now() - objectsStart) / 100) / 10; return r; });
+
   p('scale', 'Measuring how big a JST-2 unit is');
   let unitsToFloor: number | null = null;
   let scaleSource: TextSceneResult['scaleSource'] = 'provider-reconstruction';
-  if (pano.probeSpz) {
-    // The provider's own scene: origin at the capture point, Y up (SPZ v4).
-    unitsToFloor = distanceToFloor(readSpz(pano.probeSpz), [0, 0, 0], [0, -1, 0], { radius: 0.08, maxDistance: 10 });
-  }
+  // The provider's own reconstruction (JST-2 painter) is of the full panorama: same scale as the erased one.
+  if (pano.probeSpz) unitsToFloor = distanceToFloor(readSpz(pano.probeSpz), [0, 0, 0], [0, -1, 0], { radius: 0.08, maxDistance: 10 });
   if (unitsToFloor === null) {
     scaleSource = 'calibration';
-    const cal = await deps.jst2.customPano({ sessionId: newSessionId('sgcal'), panorama: pano.bytes, mime: pano.mime, c2w: toServiceC2W(filePose), metersPerUnit: 1 });
+    const cal = await deps.jst2.customPano({ sessionId: newSessionId('sgcal'), panorama: envPano.bytes, mime: envPano.mime, c2w: toServiceC2W(filePose), metersPerUnit: 1 });
     credits += cal.credits ?? 0;
     const done = await deps.jst2.wait(cal, { signal: deps.signal });
     const pts = readSpz(await deps.jst2.download(done.result!.spz.url));
@@ -183,29 +206,38 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
   const metersPerUnit = Math.round((EYE_HEIGHT / unitsToFloor) * 1000) / 1000;
   lap('scale');
 
-  p('scene', `Building the scene at the capture point (1 unit = ${metersPerUnit} m)`);
+  p('scene', `Building the environment at the capture point (1 unit = ${metersPerUnit} m)`);
   const sessionId = newSessionId('sg');
-  let task = await deps.jst2.customPano({ sessionId, panorama: pano.bytes, mime: pano.mime, c2w: toServiceC2W(filePose), metersPerUnit });
+  let task = await deps.jst2.customPano({ sessionId, panorama: envPano.bytes, mime: envPano.mime, c2w: toServiceC2W(filePose), metersPerUnit });
   credits += task.credits ?? 0;
   task = await deps.jst2.wait(task, { signal: deps.signal });
   const spz = await deps.jst2.download(task.result!.spz.url);
-  await writeFile(join(dir, 'scene.spz'), spz);
   lap('scene');
 
-  let finalSpz = spz;
+  let envSpz = spz;
   let batchIds = task.result!.outputBatch ? [task.result!.outputBatch.batchId] : [];
   let fill: FillResult | null = null;
   const maxFills = deps.maxFills === undefined || deps.maxFills === 'auto' ? fillBudget(layout.room ? layout.room.width * layout.room.depth : null) : deps.maxFills;
   if (maxFills > 0) {
-    p('fill', `Looking for gaps in the scene (up to ${maxFills} views)`);
+    p('fill', `Looking for gaps in the environment (up to ${maxFills} views)`);
     const f = await autoFill(spz, dir, { jst2: deps.jst2, sessionId, batchIds, capture: [0, 0, 0], maxFills, signal: deps.signal, onProgress: (m) => p('fill', m) });
     fill = f.result;
     credits += f.result.credits;
     batchIds = f.result.batchIds;
-    finalSpz = f.spz;
-    if (f.result.rounds.length) await writeFile(join(dir, 'scene.spz'), finalSpz);
+    envSpz = f.spz;
     lap('fill');
   }
+  await writeFile(join(dir, 'environment.spz'), envSpz);
+
+  p('objects', 'Waiting for the objects');
+  const objects = await objectsJob;
+  lap('compose');
+  // The composed scene: the environment and every object, one file (the director loads one), in the
+  // scene's frame - capture point at the origin, metres, Y up. The viewer loads the parts separately.
+  const parts = [readSpzGaussians(envSpz)];
+  for (const o of objects) if (o.file) parts.push(readSpzGaussians(new Uint8Array(await readFile(join(dir, o.file)))));
+  const finalSpz = parts.length > 1 ? writeSpzGaussians(concatGaussians(parts)) : envSpz;
+  await writeFile(join(dir, 'scene.spz'), finalSpz);
 
   p('verify', 'Checking the scene against the blockout');
   const lowRes = renderEquirect(buildScene(layout), c.capture, 256, 128);
@@ -230,7 +262,8 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
     panoAttempts,
     candidates,
     chosen: chosen.index,
-    files: { depth: 'depth.png', semantic: 'semantic.png', shaded: 'shaded.png', panorama: panoName, scene: 'scene.spz', layout: 'layout.json' },
+    objects,
+    files: { depth: 'depth.png', semantic: 'semantic.png', shaded: 'shaded.png', panorama: panoName, panoramaEnv: envPano === pano ? null : 'panorama-env.png', environment: 'environment.spz', scene: 'scene.spz', layout: 'layout.json' },
     legend: c.legend,
     seconds,
   };

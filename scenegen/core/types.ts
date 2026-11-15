@@ -44,6 +44,8 @@ export interface LayoutObject {
   material?: string;
   /** What it stands on (another object's id), if anything. */
   on?: string;
+  /** A key object: generated as its own 3D asset (SAM 3D) instead of as part of the environment. */
+  key?: boolean;
 }
 
 export interface Style {

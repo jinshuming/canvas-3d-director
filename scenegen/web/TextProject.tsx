@@ -14,7 +14,7 @@ import { Viewport } from './Viewport.tsx';
 
 interface ChatState { items: ChatItem[]; previousId: string | null }
 
-const STAGES: Record<string, string> = { conditions: '渲染白模', pano: '生成全景图', scale: '测量尺度', scene: 'JST-2 建场景', fill: '检测并补缺口', verify: '校验', done: '完成', start: '开始' };
+const STAGES: Record<string, string> = { conditions: '渲染白模', pano: '生成全景图', erase: '擦除物体', scale: '测量尺度', scene: 'JST-2 建环境', fill: '检测并补缺口', objects: 'SAM 3D 物体（与环境并行）', compose: '合成', verify: '校验', done: '完成', start: '开始' };
 
 export function TextProject({ project, config, onChanged }: { project: Project; config: Config; onChanged: () => void }) {
   const [layout, setLayout] = useState<Layout>(project.layout);
@@ -29,6 +29,7 @@ export function TextProject({ project, config, onChanged }: { project: Project; 
   const [result, setResult] = useState(project.result ?? null);
   const [provider, setProvider] = useState(config.defaultProvider);
   const [fills, setFills] = useState<number | 'auto'>('auto');
+  const [splitObjects, setSplitObjects] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [exported, setExported] = useState(project.exported ?? null);
   const layoutRef = useRef(layout);
@@ -69,7 +70,7 @@ export function TextProject({ project, config, onChanged }: { project: Project; 
   async function generate(): Promise<Job> {
     setError(null);
     await api.put(project.id, { layout: layoutRef.current, title: layoutRef.current.title });
-    const j = await api.generate(project.id, { provider, maxFills: fills });
+    const j = await api.generate(project.id, { provider, maxFills: fills, objects: splitObjects });
     setJob(j);
     return j;
   }
@@ -92,12 +93,29 @@ export function TextProject({ project, config, onChanged }: { project: Project; 
     }
     let state: ChatState = chat;
     const emit = (it: ChatItem) => { state = { ...state, items: [...state.items, it] }; setChat(state); };
+    if (!layoutRef.current.objects.length) {
+      // Nothing laid out yet: the fast path - one structured call, deterministic placement.
+      emit({ role: 'user', text: text || (pics.length > 1 ? '（视频）' : '（图片）'), image: pics.length === 1 ? pics[0] : undefined });
+      try {
+        const q = await api.quickLayout(project.id, { text, useVideo: pics.length > 1, useReference: pics.length === 1 });
+        setLayout(q.layout); layoutRef.current = q.layout;
+        emit({ role: 'assistant', text: `白模已摆好：${q.layout.objects.length} 个物体，关键物体 ${q.keys.join('、') || '无'}（${(q.seconds.model + q.seconds.place).toFixed(1)} 秒）。可以直接生成，或继续说要改什么。` });
+      } catch (e) {
+        setError((e as Error).message);
+        emit({ role: 'assistant', text: `出错了：${(e as Error).message}` });
+      } finally {
+        persist(layoutRef.current, state);
+        setBusy(false);
+        void refreshConditions();
+      }
+      return;
+    }
     const work = structuredClone(layoutRef.current);
     const host = projectHost(project.id, work, {
       toDataUrl,
       onChanged: () => setLayout(structuredClone(work)),
       onConditions: setCond,
-      generateBody: (p) => { if (p) setProvider(p); return { provider: p ?? provider, maxFills: fills }; },
+      generateBody: (p) => { if (p) setProvider(p); return { provider: p ?? provider, maxFills: fills, objects: splitObjects }; },
       onJob: setJob,
     });
     try {
@@ -119,7 +137,7 @@ export function TextProject({ project, config, onChanged }: { project: Project; 
   }
 
   const issues = checkLayout(layout);
-  const r = result as null | { files: Record<string, string>; alignment: { floorY: number | null; within25: number; objectsWithin25: number; medianLogError: number }; metersPerUnit: number; credits: number; provider: string; seconds: Record<string, number>; prompt: string; candidates?: Array<{ file: string; objects: number | null; people: { prominent: boolean } | null }>; chosen?: number; fill: null | { rounds: Array<{ holeBefore: number; holeAfter: number | null; pose: { position: number[]; yaw: number } }>; before: { worstHole: number }; after: { worstHole: number } } };
+  const r = result as null | { objects?: Array<{ id: string; label: string; file: string | null; crop: string; spread: number | null; gaussians: number | null; seconds: number | null; error: string | null }>; files: Record<string, string>; alignment: { floorY: number | null; within25: number; objectsWithin25: number; medianLogError: number }; metersPerUnit: number; credits: number; provider: string; seconds: Record<string, number>; prompt: string; candidates?: Array<{ file: string; objects: number | null; people: { prominent: boolean } | null }>; chosen?: number; fill: null | { rounds: Array<{ holeBefore: number; holeAfter: number | null; pose: { position: number[]; yaw: number } }>; before: { worstHole: number }; after: { worstHole: number } } };
   const stamp = job?.endedAt ?? 0;
 
   return (
@@ -127,7 +145,7 @@ export function TextProject({ project, config, onChanged }: { project: Project; 
       <section className="chat">
         <div className="chat-log">
           {!chat.items.length && <div className="hint">
-            <p>用一句话描述场景，或上传一张图片 / 一段视频，agent 会用白模资产把它摆出来，然后从合适的位置生成全景图，再交给 JST-2 建出 3D 场景。</p>
+            <p>用一句话描述场景，或上传一张图片 / 一段视频，几秒内摆成白模；生成时关键物体用 SAM 3D 单独建模，环境交给 JST-2，最后按白模的位置组合在一起。之后的消息由 agent 修改白模。</p>
             <p>也可以先载入示例布局：</p>
             <div className="row"><button onClick={() => update(livingRoom())}>示例：北欧客厅</button><button onClick={() => update(townSquare())}>示例：小镇广场</button></div>
             {!config.agent && <p className="warn">服务端没有配置 OPENAI_API_KEY，agent 不可用。</p>}
@@ -159,7 +177,7 @@ export function TextProject({ project, config, onChanged }: { project: Project; 
           <button onClick={() => void refreshConditions()} disabled={!layout.objects.length}>重新渲染</button>
         </div>
         <div className={`pano${tab === 'scene' ? ' tall' : ''}`}>
-          {tab === 'scene' && r ? <SplatViewer url={file(project.id, `out/${r.files.scene}`, stamp)} yaw={(r as unknown as { capture: { yaw: number } }).capture.yaw} /> : tab === 'pano' && r ? <img src={file(project.id, `out/${r.files.panorama}`, stamp)} alt="" /> : cond ? <img src={cond.files[tab === 'pano' || tab === 'scene' ? 'shaded' : tab]} alt="" /> : <div className="empty">摆好白模后在这里看到全景条件图</div>}
+          {tab === 'scene' && r ? <SplatViewer url={file(project.id, `out/${r.objects?.some((o) => o.file) && r.files.environment ? r.files.environment : r.files.scene}`, stamp)} objects={r.files.environment ? (r.objects ?? []).filter((o) => o.file).map((o) => ({ id: o.id, label: o.label, url: file(project.id, `out/${o.file}`, stamp) })) : []} yaw={(r as unknown as { capture: { yaw: number } }).capture.yaw} /> : tab === 'pano' && r ? <img src={file(project.id, `out/${r.files.panorama}`, stamp)} alt="" /> : cond ? <img src={cond.files[tab === 'pano' || tab === 'scene' ? 'shaded' : tab]} alt="" /> : <div className="empty">摆好白模后在这里看到全景条件图</div>}
         </div>
       </section>
 
@@ -179,6 +197,7 @@ export function TextProject({ project, config, onChanged }: { project: Project; 
         <h3>生成</h3>
         <label>全景图生成<select value={provider} onChange={(e) => setProvider(e.target.value)}>{config.providers.map((p) => <option key={p.id} value={p.id} disabled={!p.available}>{p.label}{p.available ? '' : '（未配置）'}</option>)}</select></label>
         <label>自动补缺口<select value={String(fills)} onChange={(e) => setFills(e.target.value === 'auto' ? 'auto' : Number(e.target.value))}><option value="auto">自动（按场景大小，最多 3 个）</option>{[0, 1, 2, 3].map((n) => <option key={n} value={n}>{n ? `最多 ${n} 个视角` : '不补'}</option>)}</select></label>
+        <label className="check"><input type="checkbox" checked={splitObjects} onChange={(e) => setSplitObjects(e.target.checked)} />关键物体单独生成（SAM 3D）</label>
         <button className="primary wide" disabled={!layout.objects.length || job?.status === 'running' || !config.viggle} onClick={() => void generate().catch((e) => setError((e as Error).message))}>生成 3D 场景</button>
         <p className="muted small">JST-2：全景 + 场景约 12 额度，每补一个缺口约 13 额度；自动档补到最大空洞低于 5% 为止</p>
         {job && <div className={`job ${job.status}`}>
@@ -198,9 +217,10 @@ export function TextProject({ project, config, onChanged }: { project: Project; 
             <tr><td>额度</td><td>{r.credits}</td></tr>
             <tr><td>耗时</td><td>{Object.entries(r.seconds).map(([k, v]) => `${STAGES[k] ?? k} ${v}s`).join(' · ')}</td></tr>
           </tbody></table>
+          {r.objects && r.objects.length > 0 && <><h3>关键物体（SAM 3D）</h3><div className="assets">{r.objects.map((o) => <figure key={o.id} className={o.file ? '' : 'err'} title={o.error ?? o.label}><img src={file(project.id, `out/${o.crop}`, stamp)} alt="" /><figcaption>{o.id}{o.file ? ` · ${Math.round((o.gaussians ?? 0) / 1000)}k · 形状偏差 ${o.spread?.toFixed(1)}` : ' · 失败'}</figcaption></figure>)}</div></>}
           {r.candidates && r.candidates.length > 1 && <div className="cands">{r.candidates.map((c, i) => <figure key={c.file} className={i === r.chosen ? 'on' : ''}><img src={file(project.id, `out/${c.file}`, stamp)} alt="" /><figcaption>{c.objects?.toFixed(2) ?? '—'}{c.people?.prominent ? ' · 有人物' : ''}{i === r.chosen ? ' · 选中' : ''}</figcaption></figure>)}</div>}
           <div className="row">
-            <a href={file(project.id, `out/${r.files.scene}`, stamp)} download>下载 .spz</a>
+            <a href={file(project.id, `out/${r.files.scene}`, stamp)} download>下载 .spz（合成）</a>
             <a href={file(project.id, `out/${r.files.panorama}`, stamp)} target="_blank" rel="noreferrer">全景图</a>
             <a href={file(project.id, 'out/prompt.txt', stamp)} target="_blank" rel="noreferrer">prompt</a>
           </div>

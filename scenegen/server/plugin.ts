@@ -38,7 +38,9 @@ import type { TurnBody } from '../../app/server/openaiRelay.ts';
 import { SCENEGEN_INSTRUCTIONS } from '../agent/prompt.ts';
 import { Jst2Client } from './jst2.ts';
 import { createMockJst2, MOCK_PREFIX } from './mockjst2.ts';
-import { falFluxDepthProvider, jst2ReferenceProvider, openaiImageProvider, peopleCheck } from './pano.ts';
+import { sam3d } from './objects.ts';
+import { eraseObjects, falFluxDepthProvider, jst2ReferenceProvider, openaiImageProvider, peopleCheck } from './pano.ts';
+import { buildLayout, requestSpec } from './quickLayout.ts';
 import type { PanoProvider } from './pano.ts';
 import { renderConditions, textToScene } from './textScene.ts';
 import { extractKeyframes, readKeyframe } from './keyframes.ts';
@@ -241,6 +243,26 @@ export function scenegenServer(opts: ScenegenOptions): Plugin {
         files: { depth: `/scenegen/files/${proj.id}/preview/depth.png?t=${stamp}`, semantic: `/scenegen/files/${proj.id}/preview/semantic.png?t=${stamp}`, shaded: `/scenegen/files/${proj.id}/preview/shaded.png?t=${stamp}` },
       });
     }
+    // The fast blockout: one structured model call + deterministic placement (seconds, not the agent's minute).
+    if (action === '/quick-layout' && m === 'POST') {
+      const body = await readJson(req);
+      const text = String(body.text ?? '').trim();
+      const images: string[] = [];
+      const kdir = join(pdir(proj.id), 'layout-video');
+      const frames = existsSync(kdir) ? (await readdir(kdir)).filter((f) => /^keyframe-\d+\.jpg$/.test(f)).sort() : [];
+      if (body.useVideo !== false && frames.length) for (const f of frames) images.push(`data:image/jpeg;base64,${(await readFile(join(kdir, f))).toString('base64')}`);
+      else if (proj.reference && body.useReference !== false) images.push(`data:${proj.reference.mime};base64,${(await readFile(join(pdir(proj.id), proj.reference.file))).toString('base64')}`);
+      if (!text && !images.length) throw new HttpError(400, 'Give a description, a picture or a video.');
+      const t0 = Date.now();
+      const spec = await requestSpec({ text, images }, { apiKey: opts.openai?.apiKey, base: opts.openai?.base, model: opts.openai?.model ?? 'gpt-6-luna' });
+      const t1 = Date.now();
+      const built = buildLayout(spec, text);
+      proj.layout = built.layout;
+      proj.title = built.layout.title;
+      proj.result = null;
+      await save(proj);
+      return json(res, { layout: built.layout, keys: built.keys, issuesFixed: built.issuesFixed, seconds: { model: (t1 - t0) / 1000, place: (Date.now() - t1) / 1000 } });
+    }
     if (action === '/generate' && m === 'POST') {
       const body = await readJson(req);
       const provider = providers.find((x) => x.id === (body.provider ?? defaultProvider()));
@@ -251,9 +273,14 @@ export function scenegenServer(opts: ScenegenOptions): Plugin {
       const styleImage = proj.reference && body.useReference !== false ? { bytes: new Uint8Array(await readFile(join(pdir(proj.id), proj.reference.file))), mime: proj.reference.mime } : undefined;
       const maxFills = body.maxFills === undefined || body.maxFills === 'auto' ? 'auto' as const : Math.max(0, Math.min(4, Number(body.maxFills) || 0));
       const vision = peopleCheck({ apiKey: opts.openai?.apiKey, base: opts.openai?.base, model: opts.openai?.model ?? 'gpt-6-luna' });
+      // Key objects as SAM 3D assets + the environment without them, when SAM 3D (fal) and the image edit (OpenAI) are both there.
+      const objects = body.objects !== false && opts.falKey && opts.openai?.apiKey ? {
+        sam3d: (image: Uint8Array, box: [number, number, number, number]) => sam3d(image, box, opts.falKey),
+        erase: (input: Parameters<typeof eraseObjects>[1]) => eraseObjects({ apiKey: opts.openai?.apiKey, base: opts.openai?.base, model: opts.imageModel }, input),
+      } : undefined;
       const job = startJob(proj, 'text', (j, signal) => textToScene(layout, join(pdir(proj.id), 'out'), {
-        jst2, provider, styleImage, maxFills, vision, prompt: typeof body.prompt === 'string' && body.prompt.trim() ? body.prompt.trim() : undefined, signal,
-        onProgress: (stage, message) => note(j, stage, message, { conditions: 0.05, pano: 0.1, scale: 0.4, scene: 0.45, fill: 0.6, verify: 0.97, done: 1 }[stage]),
+        jst2, provider, styleImage, maxFills, vision, objects, prompt: typeof body.prompt === 'string' && body.prompt.trim() ? body.prompt.trim() : undefined, signal,
+        onProgress: (stage, message) => note(j, stage, message, { conditions: 0.05, pano: 0.1, scale: 0.35, scene: 0.45, fill: 0.6, objects: 0.8, verify: 0.97, done: 1 }[stage]),
       }));
       return json(res, job, 202);
     }
