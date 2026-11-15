@@ -39,6 +39,7 @@ import { createMockJst2, MOCK_PREFIX } from './mockjst2.ts';
 import { falFluxDepthProvider, jst2ReferenceProvider, openaiImageProvider } from './pano.ts';
 import type { PanoProvider } from './pano.ts';
 import { renderConditions, textToScene } from './textScene.ts';
+import { extractKeyframes, readKeyframe } from './keyframes.ts';
 import { videoPipelineAvailable, videoToScene } from './videoScene.ts';
 
 export interface ScenegenOptions {
@@ -249,6 +250,23 @@ export function scenegenServer(opts: ScenegenOptions): Plugin {
         onProgress: (stage, message) => note(j, stage, message, { conditions: 0.05, pano: 0.1, scale: 0.4, scene: 0.45, fill: 0.6, verify: 0.97, done: 1 }[stage]),
       }));
       return json(res, job, 202);
+    }
+    // A video to lay the blockout out from (text projects): keep it, pull keyframes for the agent,
+    // and make the middle one the style reference for the panorama.
+    if (action === '/layout-video' && m === 'PUT') {
+      const type = (req.headers['content-type'] ?? '').split(';')[0]!.trim();
+      if (!/^video\//.test(type)) throw new HttpError(415, 'Send the video as the raw body with a video/* Content-Type.');
+      const dir = join(pdir(proj.id), 'layout-video');
+      await mkdir(dir, { recursive: true });
+      const file = join(dir, type.includes('quicktime') ? 'input.mov' : 'input.mp4');
+      await pipeline(req, createWriteStream(file));
+      const frames = await extractKeyframes(file, dir, { count: Number(url.searchParams.get('frames') ?? 6) || 6 });
+      const mid = frames[Math.floor(frames.length / 2)]!;
+      await writeFile(join(pdir(proj.id), 'reference.jpg'), await readKeyframe(dir, mid.file));
+      proj.reference = { file: 'reference.jpg', mime: 'image/jpeg' };
+      await save(proj);
+      const stamp = Date.now();
+      return json(res, { frames: frames.map((f) => ({ ...f, url: `/scenegen/files/${proj.id}/layout-video/${f.file}?t=${stamp}` })) });
     }
     if (action === '/reference' && m === 'PUT') {
       const type = (req.headers['content-type'] ?? '').split(';')[0]!.trim();

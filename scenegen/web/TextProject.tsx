@@ -20,7 +20,7 @@ export function TextProject({ project, config, onChanged }: { project: Project; 
   const [chat, setChat] = useState<ChatState>(() => (project.chat[0] as ChatState | undefined) ?? { items: [], previousId: null });
   const [busy, setBusy] = useState(false);
   const [draft, setDraft] = useState('');
-  const [picture, setPicture] = useState<{ blob: Blob; url: string } | null>(null);
+  const [picture, setPicture] = useState<{ blob: Blob; url: string; video?: boolean } | null>(null);
   const [cond, setCond] = useState<Conditions | null>(null);
   const [tab, setTab] = useState<'shaded' | 'depth' | 'semantic' | 'pano'>('shaded');
   const [selected, setSelected] = useState<string | null>(null);
@@ -79,7 +79,12 @@ export function TextProject({ project, config, onChanged }: { project: Project; 
     const text = draft.trim();
     setDraft('');
     const pics: string[] = [];
-    if (picture) {
+    if (picture?.video) {
+      // A walkthrough video: keyframes for the agent to read the place from (the middle one becomes the style reference).
+      const k = await api.layoutVideo(project.id, picture.blob).catch((e) => { setError((e as Error).message); return null; });
+      for (const f of k?.frames ?? []) pics.push(await toDataUrl(f.url, 768));
+      setPicture(null);
+    } else if (picture) {
       await api.reference(project.id, picture.blob).catch(() => null);
       pics.push(await toDataUrl(picture.blob, 1280));
       setPicture(null);
@@ -133,7 +138,7 @@ export function TextProject({ project, config, onChanged }: { project: Project; 
       <section className="chat">
         <div className="chat-log">
           {!chat.items.length && <div className="hint">
-            <p>用一句话描述场景，或上传一张图片，agent 会用白模资产把它摆出来，然后从合适的位置生成全景图，再交给 JST-2 建出 3D 场景。</p>
+            <p>用一句话描述场景，或上传一张图片 / 一段视频，agent 会用白模资产把它摆出来，然后从合适的位置生成全景图，再交给 JST-2 建出 3D 场景。</p>
             <p>也可以先载入示例布局：</p>
             <div className="row"><button onClick={() => update(livingRoom())}>示例：北欧客厅</button><button onClick={() => update(townSquare())}>示例：小镇广场</button></div>
             {!config.agent && <p className="warn">服务端没有配置 OPENAI_API_KEY，agent 不可用。</p>}
@@ -142,10 +147,11 @@ export function TextProject({ project, config, onChanged }: { project: Project; 
           {busy && <div className="msg assistant pending">思考中…</div>}
         </div>
         <div className="composer">
-          {picture && <div className="attached"><img src={picture.url} alt="" /><button onClick={() => setPicture(null)}>×</button></div>}
+          {picture && <div className="attached">{picture.video ? <video src={picture.url} muted /> : <img src={picture.url} alt="" />}<button onClick={() => setPicture(null)}>×</button></div>}
           <textarea value={draft} placeholder="例如：一间温暖的日式茶室，榻榻米、矮桌、纸拉门，傍晚的光" onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }} disabled={busy} />
           <div className="row">
             <label className="file-btn">图片<input type="file" accept="image/png,image/jpeg,image/webp" onChange={(e) => { const f = e.target.files?.[0]; if (f) setPicture({ blob: f, url: URL.createObjectURL(f) }); e.target.value = ''; }} /></label>
+            <label className="file-btn">视频<input type="file" accept="video/mp4,video/quicktime" onChange={(e) => { const f = e.target.files?.[0]; if (f) setPicture({ blob: f, url: URL.createObjectURL(f), video: true }); e.target.value = ''; }} /></label>
             <span className="grow" />
             <button className="primary" onClick={() => void send()} disabled={busy || (!draft.trim() && !picture) || !config.agent}>发送</button>
           </div>
