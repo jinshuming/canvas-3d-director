@@ -22,10 +22,10 @@ function App() {
   return (
     <div className="app">
       <header>
-        <b>场景生成</b>
-        <span className="muted">文本 / 图片 → 白模 → 全景 → JST-2 · 视频 → 位姿 → JST-2</span>
+        <b>场景生成 · 批量测试</b>
+        <span className="muted">逐个项目查看输入、白模、全景候选、3D 场景和指标；日常使用请在画布上加「场景生成」「场景重建」节点</span>
         <span className="grow" />
-        <a href="/canvas" className="muted">导演台 →</a>
+        <a href="/canvas" className="muted">回到画布 →</a>
       </header>
       <div className="body">
         <nav>

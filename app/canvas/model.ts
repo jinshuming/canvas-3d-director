@@ -1,6 +1,6 @@
 /** The mock canvas: nodes on an infinite board, kept in this browser only. */
 
-export type NodeKind = 'image' | 'video' | '3d' | 'text' | 'previs' | 'world';
+export type NodeKind = 'image' | 'video' | '3d' | 'text' | 'previs' | 'world' | 'scenegen' | 'scenerecon';
 
 export interface CanvasNode {
   id: string;
@@ -15,6 +15,8 @@ export interface CanvasNode {
   text?: string;
   /** World nodes: the World project file this node opens. */
   worldId?: string;
+  /** 场景生成 / 场景重建 nodes: the scene generator project (scenegen/) this node runs. */
+  projectId?: string;
   title?: string;
 }
 
@@ -27,11 +29,11 @@ export interface CanvasState {
 }
 
 export const NODE_LABEL: Record<NodeKind, string> = {
-  image: 'Image', video: 'Video', '3d': '3D', text: 'Text', previs: 'Agentic Previs', world: 'World',
+  image: 'Image', video: 'Video', '3d': '3D', text: 'Text', previs: 'Agentic Previs', world: 'World', scenegen: '场景生成', scenerecon: '场景重建',
 };
 
 export const NODE_SIZE: Record<NodeKind, [number, number]> = {
-  image: [160, 210], video: [190, 106], '3d': [160, 106], text: [200, 120], previs: [160, 106], world: [260, 190],
+  image: [160, 210], video: [190, 106], '3d': [160, 106], text: [200, 120], previs: [160, 106], world: [260, 190], scenegen: [300, 250], scenerecon: [300, 250],
 };
 
 const KEY = 'viggle-director:canvas:v1';
