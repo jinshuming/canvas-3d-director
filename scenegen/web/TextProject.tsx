@@ -27,7 +27,7 @@ export function TextProject({ project, config, onChanged }: { project: Project; 
   const [job, setJob] = useState<Job | null>(project.job ?? null);
   const [result, setResult] = useState(project.result ?? null);
   const [provider, setProvider] = useState(config.defaultProvider);
-  const [fills, setFills] = useState(2);
+  const [fills, setFills] = useState<number | 'auto'>('auto');
   const [error, setError] = useState<string | null>(null);
   const [exported, setExported] = useState(project.exported ?? null);
   const layoutRef = useRef(layout);
@@ -189,9 +189,9 @@ export function TextProject({ project, config, onChanged }: { project: Project; 
 
         <h3>生成</h3>
         <label>全景图生成<select value={provider} onChange={(e) => setProvider(e.target.value)}>{config.providers.map((p) => <option key={p.id} value={p.id} disabled={!p.available}>{p.label}{p.available ? '' : '（未配置）'}</option>)}</select></label>
-        <label>自动补缺口<select value={fills} onChange={(e) => setFills(Number(e.target.value))}>{[0, 1, 2, 3].map((n) => <option key={n} value={n}>{n ? `最多 ${n} 个视角` : '不补'}</option>)}</select></label>
+        <label>自动补缺口<select value={String(fills)} onChange={(e) => setFills(e.target.value === 'auto' ? 'auto' : Number(e.target.value))}><option value="auto">自动（按场景大小，最多 3 个）</option>{[0, 1, 2, 3].map((n) => <option key={n} value={n}>{n ? `最多 ${n} 个视角` : '不补'}</option>)}</select></label>
         <button className="primary wide" disabled={!layout.objects.length || job?.status === 'running' || !config.viggle} onClick={() => void generate().catch((e) => setError((e as Error).message))}>生成 3D 场景</button>
-        <p className="muted small">JST-2：全景 + 场景约 12 额度，每补一个缺口约 13 额度</p>
+        <p className="muted small">JST-2：全景 + 场景约 12 额度，每补一个缺口约 13 额度；自动档补到最大空洞低于 5% 为止</p>
         {job && <div className={`job ${job.status}`}>
           <div className="bar"><div style={{ width: `${Math.round(job.progress * 100)}%` }} /></div>
           <div>{job.status === 'running' ? `${STAGES[job.stage] ?? job.stage}：${job.message}` : job.status === 'done' ? '已完成' : `失败：${job.error}`}</div>

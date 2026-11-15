@@ -32,12 +32,25 @@ export function gapPose(v: GapView): CameraPose {
   return { position: v.position, yaw: Math.atan2(fx, -fz) / DEG, pitch: Math.asin(Math.max(-1, Math.min(1, fy))) / DEG };
 }
 
+/**
+ * How many views a scene may need: one per ~25 m² of room (at most 3), 3 outdoors. The loop
+ * stops sooner once the worst gap is under `targetHole`. Measured on the first end-to-end run:
+ * one view left larger spaces as holed as before (a fill shows what was behind one thing, and the
+ * rebuild exposes the next gap).
+ */
+export function fillBudget(area: number | null): number {
+  if (area === null) return 3;
+  return area <= 25 ? 1 : area <= 60 ? 2 : 3;
+}
+
 export async function autoFill(spz: Uint8Array, dir: string, deps: {
   jst2: Jst2Client; sessionId: string; batchIds: string[]; capture: Vec3;
   /** At most this many generations. Default 2. */
   maxFills?: number;
   /** Only views whose frame is at least this share hole. Default 0.04. */
   minHole?: number;
+  /** Stop once the worst view is under this share hole. Default 0.05. */
+  targetHole?: number;
   signal?: AbortSignal;
   onProgress?: (message: string) => void;
 }): Promise<{ spz: Uint8Array; result: FillResult }> {
@@ -52,8 +65,10 @@ export async function autoFill(spz: Uint8Array, dir: string, deps: {
   const worst = (c: ReturnType<typeof gapsOf>) => c.views.reduce((m, v) => Math.max(m, v.hole), 0);
   const before = { views: first.views.length, worstHole: worst(first) };
   let check = first;
+  const target = deps.targetHole ?? 0.05;
   for (let i = 0; i < max; i++) {
-    const v = check.views.find((x) => x.role === 'hole' && x.hole >= minHole) ?? check.views.find((x) => x.hole >= minHole);
+    if (worst(check) < target) { p(i ? `Worst gap now ${(worst(check) * 100).toFixed(0)}%: done.` : 'The scene has no gaps worth filling.'); break; }
+    const v = [...check.views].filter((x) => x.hole >= minHole).sort((a, b) => b.hole - a.hole)[0];
     if (!v) { p(i ? 'No gaps left worth a generation.' : 'The scene has no gaps worth filling.'); break; }
     const pose = gapPose(v);
     p(`Gap ${i + 1}/${max}: ${(v.hole * 100).toFixed(0)}% hole, ${(v.blur * 100).toFixed(0)}% blur at (${v.position.map((x) => x.toFixed(1)).join(', ')}) looking ${pose.yaw.toFixed(0)}° - generating that view`);

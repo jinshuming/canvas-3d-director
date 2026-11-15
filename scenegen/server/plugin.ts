@@ -36,7 +36,7 @@ import { emptyLayout } from '../core/types.ts';
 import { SCENEGEN_INSTRUCTIONS } from '../agent/prompt.ts';
 import { Jst2Client } from './jst2.ts';
 import { createMockJst2, MOCK_PREFIX } from './mockjst2.ts';
-import { falFluxDepthProvider, jst2ReferenceProvider, openaiImageProvider } from './pano.ts';
+import { falFluxDepthProvider, jst2ReferenceProvider, openaiImageProvider, peopleCheck } from './pano.ts';
 import type { PanoProvider } from './pano.ts';
 import { renderConditions, textToScene } from './textScene.ts';
 import { extractKeyframes, readKeyframe } from './keyframes.ts';
@@ -244,9 +244,10 @@ export function scenegenServer(opts: ScenegenOptions): Plugin {
       if (!proj.layout.objects.length) throw new HttpError(400, 'The layout is empty: place some objects first.');
       const layout = structuredClone(proj.layout);
       const styleImage = proj.reference && body.useReference !== false ? { bytes: new Uint8Array(await readFile(join(pdir(proj.id), proj.reference.file))), mime: proj.reference.mime } : undefined;
-      const maxFills = body.maxFills === undefined ? 2 : Math.max(0, Math.min(4, Number(body.maxFills) || 0));
+      const maxFills = body.maxFills === undefined || body.maxFills === 'auto' ? 'auto' as const : Math.max(0, Math.min(4, Number(body.maxFills) || 0));
+      const vision = peopleCheck({ apiKey: opts.openai?.apiKey, base: opts.openai?.base, model: opts.openai?.model ?? 'gpt-6-luna' });
       const job = startJob(proj, 'text', (j, signal) => textToScene(layout, join(pdir(proj.id), 'out'), {
-        jst2, provider, styleImage, maxFills, prompt: typeof body.prompt === 'string' && body.prompt.trim() ? body.prompt.trim() : undefined, signal,
+        jst2, provider, styleImage, maxFills, vision, prompt: typeof body.prompt === 'string' && body.prompt.trim() ? body.prompt.trim() : undefined, signal,
         onProgress: (stage, message) => note(j, stage, message, { conditions: 0.05, pano: 0.1, scale: 0.4, scene: 0.45, fill: 0.6, verify: 0.97, done: 1 }[stage]),
       }));
       return json(res, job, 202);

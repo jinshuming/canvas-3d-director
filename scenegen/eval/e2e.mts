@@ -121,7 +121,7 @@ async function runLayoutCase(c: Case, dir: string, log: (m: string) => void) {
       generateCalls++;
       if (jobStarted) return { jobId: jobStarted };
       await api('PUT', `/projects/${proj.id}`, { layout, title: layout.title || c.title });
-      const j = await api<{ id: string }>('POST', `/projects/${proj.id}/generate`, { provider: 'openai-image', maxFills: 1 });
+      const j = await api<{ id: string }>('POST', `/projects/${proj.id}/generate`, { provider: 'openai-image', maxFills: 'auto' });
       jobStarted = j.id;
       return { jobId: j.id };
     },

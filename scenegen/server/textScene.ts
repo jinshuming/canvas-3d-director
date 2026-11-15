@@ -22,10 +22,10 @@ import { depthImage, depthRange, renderEquirect, semanticImage, shadedImage } fr
 import { distanceToFloor, readSpz } from '../core/spz.ts';
 import type { Layout } from '../core/types.ts';
 import { EYE_HEIGHT } from '../core/types.ts';
-import { autoFill } from './fill.ts';
+import { autoFill, fillBudget } from './fill.ts';
 import type { FillResult } from './fill.ts';
 import { Jst2Client, newSessionId } from './jst2.ts';
-import type { PanoProvider } from './pano.ts';
+import type { PanoProvider, PeopleCheck } from './pano.ts';
 import { encodePng } from './png.ts';
 
 export interface TextSceneResult {
@@ -41,6 +41,9 @@ export interface TextSceneResult {
   alignment: Alignment;
   /** The automatic gap fill (null when switched off). */
   fill: FillResult | null;
+  /** The people check on the final panorama (null when no vision model), and how many paintings it took. */
+  panoCheck: { people: boolean; note: string } | null;
+  panoAttempts: number;
   files: { depth: string; semantic: string; shaded: string; panorama: string; scene: string; layout: string };
   legend: Array<{ cls: string; color: [number, number, number]; share: number }>;
   seconds: Record<string, number>;
@@ -49,6 +52,23 @@ export interface TextSceneResult {
 export type Progress = (stage: 'conditions' | 'pano' | 'scale' | 'scene' | 'fill' | 'verify' | 'done', message: string) => void;
 
 const W = 2048, H = 1024;
+
+/** The space in numbers, for the image model: room size, ceiling, camera height, nearest walls. */
+export function geometryNote(layout: Layout, capture: CameraPose): string {
+  const h = capture.position[1].toFixed(1);
+  if (!layout.room) return `outdoors, the camera ${h} m above flat ground, the nearest large objects ${nearest(layout, capture)}`;
+  const r = layout.room;
+  const [x, , z] = capture.position;
+  const walls = [`north wall ${(z + r.depth / 2).toFixed(1)} m`, `south wall ${(r.depth / 2 - z).toFixed(1)} m`, `east wall ${(r.width / 2 - x).toFixed(1)} m`, `west wall ${(x + r.width / 2).toFixed(1)} m`];
+  return `an interior ${r.width} m wide and ${r.depth} m deep with a flat ${r.height} m ceiling; the camera stands ${h} m above the floor, so the ceiling is only ${(r.height - capture.position[1]).toFixed(1)} m above it; distances from the camera: ${walls.join(', ')}`;
+}
+
+function nearest(layout: Layout, capture: CameraPose): string {
+  return layout.objects
+    .map((o) => ({ o, d: Math.hypot(o.position[0] - capture.position[0], o.position[2] - capture.position[2]) }))
+    .sort((a, b) => a.d - b.d).slice(0, 4)
+    .map(({ o, d }) => `${o.label} ${d.toFixed(1)} m`).join(', ');
+}
 
 /** Step 1, also used on its own by the page to preview the conditions. */
 export async function renderConditions(layout: Layout, dir: string) {
@@ -68,7 +88,7 @@ export async function renderConditions(layout: Layout, dir: string) {
   return { capture, buffers: r, range, legend: sem.legend, depth, semantic, shaded };
 }
 
-export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst2Client; provider: PanoProvider; prompt?: string; styleImage?: { bytes: Uint8Array; mime: string }; maxFills?: number; signal?: AbortSignal; onProgress?: Progress }): Promise<TextSceneResult> {
+export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst2Client; provider: PanoProvider; prompt?: string; styleImage?: { bytes: Uint8Array; mime: string }; maxFills?: number | 'auto'; vision?: PeopleCheck; signal?: AbortSignal; onProgress?: Progress }): Promise<TextSceneResult> {
   const p = deps.onProgress ?? (() => {});
   const seconds: Record<string, number> = {};
   let t = Date.now();
@@ -88,8 +108,22 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
   lap('conditions');
 
   p('pano', `Painting the panorama (${deps.provider.label})`);
-  const pano = await deps.provider.generate({ prompt, depth: c.depth, semantic: c.semantic, shaded: c.shaded, styleImage: deps.styleImage, signal: deps.signal, onProgress: (m) => p('pano', m) });
+  const paint = () => deps.provider.generate({ prompt, depth: c.depth, semantic: c.semantic, shaded: c.shaded, geometry: geometryNote(layout, c.capture), styleImage: deps.styleImage, signal: deps.signal, onProgress: (m) => p('pano', m) });
+  let pano = await paint();
   credits += pano.credits ?? 0;
+  // A person in the panorama becomes a smear in the scene and a figure no one can move: check, and paint once more.
+  let panoCheck: { people: boolean; note: string } | null = null;
+  let panoAttempts = 1;
+  if (deps.vision) {
+    panoCheck = await deps.vision(pano.bytes).catch(() => null);
+    if (panoCheck?.people) {
+      p('pano', `The panorama has people in it (${panoCheck.note}): painting it again`);
+      pano = await paint();
+      panoAttempts = 2;
+      credits += pano.credits ?? 0;
+      panoCheck = await deps.vision(pano.bytes).catch(() => null);
+    }
+  }
   const panoName = pano.mime === 'image/png' ? 'panorama.png' : 'panorama.jpg';
   await writeFile(join(dir, panoName), pano.bytes);
   lap('pano');
@@ -125,9 +159,10 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
   let finalSpz = spz;
   let batchIds = task.result!.outputBatch ? [task.result!.outputBatch.batchId] : [];
   let fill: FillResult | null = null;
-  if ((deps.maxFills ?? 2) > 0) {
-    p('fill', 'Looking for gaps in the scene');
-    const f = await autoFill(spz, dir, { jst2: deps.jst2, sessionId, batchIds, capture: [0, 0, 0], maxFills: deps.maxFills ?? 2, signal: deps.signal, onProgress: (m) => p('fill', m) });
+  const maxFills = deps.maxFills === undefined || deps.maxFills === 'auto' ? fillBudget(layout.room ? layout.room.width * layout.room.depth : null) : deps.maxFills;
+  if (maxFills > 0) {
+    p('fill', `Looking for gaps in the scene (up to ${maxFills} views)`);
+    const f = await autoFill(spz, dir, { jst2: deps.jst2, sessionId, batchIds, capture: [0, 0, 0], maxFills, signal: deps.signal, onProgress: (m) => p('fill', m) });
     fill = f.result;
     credits += f.result.credits;
     batchIds = f.result.batchIds;
@@ -155,6 +190,8 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
     credits,
     alignment,
     fill,
+    panoCheck,
+    panoAttempts,
     files: { depth: 'depth.png', semantic: 'semantic.png', shaded: 'shaded.png', panorama: panoName, scene: 'scene.spz', layout: 'layout.json' },
     legend: c.legend,
     seconds,
