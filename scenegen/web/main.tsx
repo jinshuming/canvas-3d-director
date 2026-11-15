@@ -1,0 +1,55 @@
+import { useCallback, useEffect, useState } from 'react';
+import { createRoot } from 'react-dom/client';
+
+import { api } from './api.ts';
+import type { Config, Project, ProjectSummary } from './api.ts';
+import { TextProject } from './TextProject.tsx';
+import { VideoProject } from './VideoProject.tsx';
+import './styles.css';
+
+function App() {
+  const [config, setConfig] = useState<Config | null>(null);
+  const [list, setList] = useState<ProjectSummary[]>([]);
+  const [current, setCurrent] = useState<Project | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(() => { void api.projects().then(setList).catch((e) => setError((e as Error).message)); }, []);
+  useEffect(() => { void api.config().then(setConfig).catch((e) => setError((e as Error).message)); refresh(); }, [refresh]);
+  const open = async (id: string) => { setCurrent(await api.get(id)); history.replaceState(null, '', `#${id}`); };
+  useEffect(() => { const id = location.hash.slice(1); if (id) void open(id).catch(() => {}); }, []);
+  const create = async (kind: 'text' | 'video') => { const p = await api.create(kind); refresh(); setCurrent(p); history.replaceState(null, '', `#${p.id}`); };
+
+  return (
+    <div className="app">
+      <header>
+        <b>场景生成</b>
+        <span className="muted">文本 / 图片 → 白模 → 全景 → JST-2 · 视频 → 位姿 → JST-2</span>
+        <span className="grow" />
+        <a href="/canvas" className="muted">导演台 →</a>
+      </header>
+      <div className="body">
+        <nav>
+          <div className="row"><button className="primary" onClick={() => void create('text')}>＋ 文本 / 图片</button><button onClick={() => void create('video')}>＋ 视频</button></div>
+          <ul>
+            {list.map((p) => <li key={p.id} className={current?.id === p.id ? 'on' : ''} onClick={() => void open(p.id)}>
+              <div>{p.kind === 'video' ? '🎬' : '🧱'} {p.title}</div>
+              <div className="muted small">{statusText(p.status)}{p.exported ? ' · 已导入' : ''}</div>
+            </li>)}
+          </ul>
+        </nav>
+        <main>
+          {error && <div className="error">{error}</div>}
+          {!current || !config ? <div className="empty">新建一个项目，或从左边打开</div>
+            : current.kind === 'video' ? <VideoProject key={current.id} project={current} config={config} onChanged={refresh} />
+            : <TextProject key={current.id} project={current} config={config} onChanged={refresh} />}
+        </main>
+      </div>
+    </div>
+  );
+}
+
+function statusText(s: string) {
+  return ({ draft: '草稿', running: '生成中', done: '已生成', failed: '失败' } as Record<string, string>)[s] ?? s;
+}
+
+createRoot(document.getElementById('root')!).render(<App />);

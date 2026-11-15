@@ -49,8 +49,8 @@ export interface PosedView {
 export interface Jst2Options {
   apiKey?: string;
   base?: string;
-  /** Where `posed-images` lives. Default `base`. */
-  posedImagesBase?: string;
+  /** Where `posed-images` lives (a function: read at each call). Default `base`. */
+  posedImagesBase?: string | (() => string);
   fetch?: typeof fetch;
 }
 
@@ -67,11 +67,12 @@ export function newSessionId(prefix = 'sg'): string {
 
 export class Jst2Client {
   private readonly base: string;
-  private readonly posedBase: string;
+  private readonly posedBaseOf: () => string;
   private readonly f: typeof fetch;
   constructor(private readonly opts: Jst2Options) {
     this.base = (opts.base ?? 'https://apis.viggle.ai').replace(/\/$/, '');
-    this.posedBase = (opts.posedImagesBase ?? this.base).replace(/\/$/, '');
+    const pb = opts.posedImagesBase;
+    this.posedBaseOf = () => (typeof pb === 'function' ? pb() : pb ?? this.base).replace(/\/$/, '');
     this.f = opts.fetch ?? ((...a) => globalThis.fetch(...a));
   }
 
@@ -116,7 +117,7 @@ export class Jst2Client {
    * `[{ c2w, intrinsic }]`, in the order of the files), `imageFiles` (one per view), optional
    * `metersPerUnit`. Returns a task like the others; its `outputBatch.kind` is `uploaded`.
    */
-  posedImages(input: { sessionId: string; views: PosedView[]; metersPerUnit?: number }): Promise<SceneTask> {
+  async posedImages(input: { sessionId: string; views: PosedView[]; metersPerUnit?: number }): Promise<SceneTask> {
     if (input.views.length < 1 || input.views.length > MAX_VIEWS) throw new Jst2Error(`Send 1-${MAX_VIEWS} views.`, 400);
     for (const v of input.views) {
       checkC2W(v.c2w);
@@ -127,7 +128,7 @@ export class Jst2Client {
     form.append('views', JSON.stringify(input.views.map((v) => ({ c2w: v.c2w, intrinsic: v.intrinsic }))));
     if (input.metersPerUnit !== undefined) form.append('metersPerUnit', String(input.metersPerUnit));
     input.views.forEach((v, i) => form.append('imageFiles', new Blob([v.image as BlobPart], { type: v.mime }), `${String(i).padStart(4, '0')}${v.mime === 'image/png' ? '.png' : '.jpg'}`));
-    return this.send(this.posedBase, '/v1/scenes/posed-images', form);
+    return this.send(this.posedBaseOf(), '/v1/scenes/posed-images', form);
   }
 
   async get(taskId: string, base = this.base): Promise<SceneTask> {

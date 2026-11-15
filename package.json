@@ -11,7 +11,8 @@
   "scripts": {
     "dev": "vite",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test \"src/**/*.test.ts\" \"app/**/*.test.ts\""
+    "test": "tsx --test \"src/**/*.test.ts\" \"app/**/*.test.ts\" \"scenegen/**/*.test.ts\"",
+    "test:video": "cd scenegen/py && .venv/bin/python -m pytest -q"
   },
   "dependencies": {
     "@viggle/splat-engine": "0.3.2",
