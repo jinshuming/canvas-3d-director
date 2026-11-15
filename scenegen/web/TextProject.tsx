@@ -131,7 +131,7 @@ export function TextProject({ project, config, onChanged }: { project: Project; 
   }
 
   const issues = checkLayout(layout);
-  const r = result as null | { files: Record<string, string>; alignment: { floorY: number | null; within25: number; objectsWithin25: number; medianLogError: number }; metersPerUnit: number; credits: number; provider: string; seconds: Record<string, number>; prompt: string; fill: null | { rounds: Array<{ holeBefore: number; holeAfter: number | null; pose: { position: number[]; yaw: number } }>; before: { worstHole: number }; after: { worstHole: number } } };
+  const r = result as null | { files: Record<string, string>; alignment: { floorY: number | null; within25: number; objectsWithin25: number; medianLogError: number }; metersPerUnit: number; credits: number; provider: string; seconds: Record<string, number>; prompt: string; candidates?: Array<{ file: string; objects: number | null; people: { prominent: boolean } | null }>; chosen?: number; fill: null | { rounds: Array<{ holeBefore: number; holeAfter: number | null; pose: { position: number[]; yaw: number } }>; before: { worstHole: number }; after: { worstHole: number } } };
   const stamp = job?.endedAt ?? 0;
 
   return (
@@ -205,10 +205,12 @@ export function TextProject({ project, config, onChanged }: { project: Project; 
             <tr><td>地面高度</td><td>{r.alignment.floorY ?? '?'} m（目标 0）</td></tr>
             <tr><td>与白模深度一致（±25%）</td><td>整体 {Math.round(r.alignment.within25 * 100)}% · 物体 {Math.round(r.alignment.objectsWithin25 * 100)}%</td></tr>
             <tr><td>尺度</td><td>1 JST-2 单位 = {r.metersPerUnit} m</td></tr>
+            {r.candidates && r.candidates.length > 1 && <tr><td>全景候选</td><td>{r.candidates.length} 张，选第 {(r.chosen ?? 0) + 1} 张（与白模对齐 {r.candidates[r.chosen ?? 0]?.objects?.toFixed(2) ?? '?'}）</td></tr>}
             {r.fill && <tr><td>补缺口</td><td>{r.fill.rounds.length} 个视角，最大空洞 {Math.round(r.fill.before.worstHole * 100)}% → {Math.round(r.fill.after.worstHole * 100)}%</td></tr>}
             <tr><td>额度</td><td>{r.credits}</td></tr>
             <tr><td>耗时</td><td>{Object.entries(r.seconds).map(([k, v]) => `${STAGES[k] ?? k} ${v}s`).join(' · ')}</td></tr>
           </tbody></table>
+          {r.candidates && r.candidates.length > 1 && <div className="cands">{r.candidates.map((c, i) => <figure key={c.file} className={i === r.chosen ? 'on' : ''}><img src={file(project.id, `out/${c.file}`, stamp)} alt="" /><figcaption>{c.objects?.toFixed(2) ?? '—'}{c.people?.prominent ? ' · 有人物' : ''}{i === r.chosen ? ' · 选中' : ''}</figcaption></figure>)}</div>}
           <div className="row">
             <a href={file(project.id, `out/${r.files.scene}`, stamp)} download>下载 .spz</a>
             <a href={file(project.id, `out/${r.files.panorama}`, stamp)} target="_blank" rel="noreferrer">全景图</a>

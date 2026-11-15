@@ -91,3 +91,8 @@ main { flex: 1; min-width: 0; overflow: hidden; }
 .splat-viewer .overlay { position: absolute; inset: 0; display: grid; place-items: center; color: #cfd3d8; }
 .splat-viewer .hint { position: absolute; left: 8px; bottom: 6px; font-size: 11px; color: #cfd3d8; background: rgba(0,0,0,.45); padding: 2px 6px; border-radius: 4px; }
 .video-scene { height: 380px; margin-bottom: 10px; border-radius: 8px; overflow: hidden; }
+.cands { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin-top: 6px; }
+.cands figure { margin: 0; border: 2px solid transparent; border-radius: 4px; }
+.cands figure.on { border-color: var(--accent); }
+.cands img { width: 100%; display: block; border-radius: 3px; }
+.cands figcaption { font-size: 10px; color: var(--muted); text-align: center; }

@@ -8,7 +8,7 @@
  *   scene       custom-pano at the capture pose with that scale → scene.spz in our world
  *   verify      floor height and depth agreement with the blockout
  */
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { measureAlignment } from '../core/align.ts';
@@ -22,6 +22,7 @@ import { depthImage, depthRange, renderEquirect, semanticImage, shadedImage } fr
 import { distanceToFloor, readSpz } from '../core/spz.ts';
 import type { Layout } from '../core/types.ts';
 import { EYE_HEIGHT } from '../core/types.ts';
+import { scorePanoramas } from './alignScore.ts';
 import { autoFill, fillBudget } from './fill.ts';
 import type { FillResult } from './fill.ts';
 import { Jst2Client, newSessionId } from './jst2.ts';
@@ -44,10 +45,15 @@ export interface TextSceneResult {
   /** The people check on the final panorama (null when no vision model), and how many paintings it took. */
   panoCheck: { people: boolean; prominent: boolean; note: string } | null;
   panoAttempts: number;
+  /** Every panorama painted, its alignment with the blockout and its figure check; `chosen` is the one kept. */
+  candidates: PanoCandidate[];
+  chosen: number;
   files: { depth: string; semantic: string; shaded: string; panorama: string; scene: string; layout: string };
   legend: Array<{ cls: string; color: [number, number, number]; share: number }>;
   seconds: Record<string, number>;
 }
+
+export interface PanoCandidate { file: string; objects: number | null; shell: number | null; people: { people: boolean; prominent: boolean; note: string } | null }
 
 export type Progress = (stage: 'conditions' | 'pano' | 'scale' | 'scene' | 'fill' | 'verify' | 'done', message: string) => void;
 
@@ -88,7 +94,7 @@ export async function renderConditions(layout: Layout, dir: string) {
   return { capture, buffers: r, range, legend: sem.legend, depth, semantic, shaded };
 }
 
-export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst2Client; provider: PanoProvider; prompt?: string; styleImage?: { bytes: Uint8Array; mime: string }; maxFills?: number | 'auto'; vision?: PeopleCheck; signal?: AbortSignal; onProgress?: Progress }): Promise<TextSceneResult> {
+export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst2Client; provider: PanoProvider; prompt?: string; styleImage?: { bytes: Uint8Array; mime: string }; maxFills?: number | 'auto'; vision?: PeopleCheck; candidates?: number; signal?: AbortSignal; onProgress?: Progress }): Promise<TextSceneResult> {
   const p = deps.onProgress ?? (() => {});
   const seconds: Record<string, number> = {};
   let t = Date.now();
@@ -107,25 +113,53 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
   await writeFile(join(dir, 'prompt.txt'), prompt);
   lap('conditions');
 
-  p('pano', `Painting the panorama (${deps.provider.label})`);
-  const paint = (withStyle: boolean) => deps.provider.generate({ prompt, depth: c.depth, semantic: c.semantic, shaded: c.shaded, geometry: geometryNote(layout, c.capture), styleImage: withStyle ? deps.styleImage : undefined, signal: deps.signal, onProgress: (m) => p('pano', m) });
-  let pano = await paint(true);
-  credits += pano.credits ?? 0;
-  // A figure in the panorama becomes a smear in the scene that no one can move: check, and paint again
-  // (at most twice more) WITHOUT the reference picture, which is where figures come from - the caption
-  // still carries its style. Small decor (figurines, pictures) is let through.
-  let panoCheck: { people: boolean; prominent: boolean; note: string } | null = null;
-  let panoAttempts = 1;
-  if (deps.vision) {
-    panoCheck = await deps.vision(pano.bytes).catch(() => null);
-    while (panoCheck?.prominent && panoAttempts < 3) {
-      p('pano', `The panorama has a figure in it (${panoCheck.note}): painting it again without the reference picture`);
-      pano = await paint(false);
-      panoAttempts++;
+  // How the panorama is painted (A/B-tested 2026-11-15, docs/SCENEGEN_DESIGN.md): the depth map AND the
+  // clay render, pixel-aligned, and NOT the user's picture - with it GPT-image-2 copies the picture's
+  // composition and ignores the blockout (alignment 0.05-0.08 against 0.55-0.64 without). The picture's
+  // look still arrives, as the agent's style text. Several candidates are painted at once and the one
+  // that follows the blockout best, with no life-size figure in it, is kept.
+  const many = deps.provider.id === 'openai-image';
+  const n = many ? Math.max(1, deps.candidates ?? 3) : 1;
+  const geometry = geometryNote(layout, c.capture);
+  const paint = () => deps.provider.generate({ prompt, depth: c.depth, semantic: c.semantic, shaded: c.shaded, geometry, withClay: many, styleImage: many ? undefined : deps.styleImage, signal: deps.signal, onProgress: () => {} });
+  await mkdir(join(dir, 'candidates'), { recursive: true });
+  const candidates: PanoCandidate[] = [];
+  let panoAttempts = 0;
+  let chosen: { pano: Awaited<ReturnType<typeof paint>>; index: number } | null = null;
+  for (let round = 0; round < 2 && !chosen; round++) {
+    p('pano', `Painting ${n} panorama candidates (${deps.provider.label})`);
+    const painted = await Promise.all(Array.from({ length: n }, () => paint()));
+    const start = candidates.length;
+    panoAttempts += n;
+    for (const [i, pano] of painted.entries()) {
       credits += pano.credits ?? 0;
-      panoCheck = await deps.vision(pano.bytes).catch(() => null);
+      const file = join(dir, 'candidates', `cand-${start + i}.${pano.mime === 'image/png' ? 'png' : 'jpg'}`);
+      await writeFile(file, pano.bytes);
+      candidates.push({ file: `candidates/${file.split('/').pop()}`, objects: null, shell: null, people: null });
     }
+    p('pano', 'Scoring the candidates against the blockout and checking for figures');
+    const [scores, checks] = await Promise.all([
+      n > 1 ? scorePanoramas(join(dir, 'semantic.png'), candidates.slice(start).map((x) => join(dir, x.file))) : Promise.resolve(null),
+      Promise.all(painted.map((x) => (deps.vision ? deps.vision(x.bytes).catch(() => null) : Promise.resolve(null)))),
+    ]);
+    painted.forEach((_, i) => {
+      const cand = candidates[start + i]!;
+      if (scores) { cand.objects = scores[i]!.objects; cand.shell = scores[i]!.shell; }
+      cand.people = checks[i] ?? null;
+    });
+    const clean = painted.map((pano, i) => ({ pano, index: start + i })).filter(({ index }) => !candidates[index]!.people?.prominent);
+    if (clean.length) chosen = clean.reduce((a, b) => ((candidates[b.index]!.objects ?? -1) > (candidates[a.index]!.objects ?? -1) ? b : a));
+    else p('pano', `Every candidate has a figure in it (${candidates[start]!.people?.note ?? ''}): painting again`);
   }
+  // Two rounds with a figure in every candidate: keep the best-aligned one anyway, and say so.
+  if (!chosen) {
+    const all = candidates.map((_, index) => index);
+    const index = all.reduce((a, b) => ((candidates[b]!.objects ?? -1) > (candidates[a]!.objects ?? -1) ? b : a));
+    chosen = { pano: { bytes: new Uint8Array(await readFile(join(dir, candidates[index]!.file))), mime: candidates[index]!.file.endsWith('.png') ? 'image/png' : 'image/jpeg' }, index };
+  }
+  const pano = chosen.pano;
+  const panoCheck = candidates[chosen.index]!.people;
+  p('pano', `Kept candidate ${chosen.index + 1} of ${candidates.length}${candidates[chosen.index]!.objects !== null ? ` (alignment ${candidates[chosen.index]!.objects!.toFixed(2)})` : ''}`);
   const panoName = pano.mime === 'image/png' ? 'panorama.png' : 'panorama.jpg';
   await writeFile(join(dir, panoName), pano.bytes);
   lap('pano');
@@ -194,6 +228,8 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
     fill,
     panoCheck,
     panoAttempts,
+    candidates,
+    chosen: chosen.index,
     files: { depth: 'depth.png', semantic: 'semantic.png', shaded: 'shaded.png', panorama: panoName, scene: 'scene.spz', layout: 'layout.json' },
     legend: c.legend,
     seconds,
