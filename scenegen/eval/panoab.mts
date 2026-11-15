@@ -9,7 +9,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import { compileCaption } from '../core/caption.ts';
 import type { Layout } from '../core/types.ts';
@@ -27,7 +27,7 @@ const VARIANTS = {
 type Variant = keyof typeof VARIANTS;
 
 const args = process.argv.slice(2);
-const out = args[0]!;
+const out = resolve(args[0]!);
 const nIdx = args.indexOf('--n');
 const n = nIdx >= 0 ? Number(args[nIdx + 1]) : 3;
 const cases = args.slice(1).filter((a, i, all) => a !== '--n' && all[i - 1] !== '--n').map((a) => { const [pid, label] = a.split(':'); return { pid: pid!, label: label ?? pid! }; });

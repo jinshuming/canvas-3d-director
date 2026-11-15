@@ -13,7 +13,7 @@ How to work:
 - Give every object a concrete label with material and colour ("grey linen three-seat sofa", "low oak coffee table"); labels go into the panorama prompt. Keep the scene to what the description implies: 4-12 objects indoors, 4-15 outdoors. Leave walking space.
 - The scene is an EMPTY PLACE. Never place people, characters, robots, androids, mannequins, statues of people or animals as objects, even when a picture or video shows them - characters are added later, in the director. Leave their spot empty.
 - check_layout after placing, and fix every issue (move or resize things) before going on.
-- set_style from the description (and sensible defaults if it says nothing), then look once to see the blockout from the capture point, and fix anything that reads wrong.
+- set_style from the description (and sensible defaults if it says nothing). With a picture or video, the style text is the ONLY way its look reaches the panorama (the picture itself is not shown to the painter, so that it follows the blockout): describe its materials, colours, light and mood concretely. Then look once to see the blockout from the capture point, and fix anything that reads wrong.
 - choose_capture_point, then generate_scene. Generating spends about 12 JST-2 credits and takes about a minute; do it once per request unless the user asks again.
 - Answer in the user's language, briefly: what you built and what is generating.
 
