@@ -22,6 +22,8 @@ import { depthImage, depthRange, renderEquirect, semanticImage, shadedImage } fr
 import { distanceToFloor, readSpz } from '../core/spz.ts';
 import type { Layout } from '../core/types.ts';
 import { EYE_HEIGHT } from '../core/types.ts';
+import { autoFill } from './fill.ts';
+import type { FillResult } from './fill.ts';
 import { Jst2Client, newSessionId } from './jst2.ts';
 import type { PanoProvider } from './pano.ts';
 import { encodePng } from './png.ts';
@@ -37,12 +39,14 @@ export interface TextSceneResult {
   batchIds: string[];
   credits: number;
   alignment: Alignment;
+  /** The automatic gap fill (null when switched off). */
+  fill: FillResult | null;
   files: { depth: string; semantic: string; shaded: string; panorama: string; scene: string; layout: string };
   legend: Array<{ cls: string; color: [number, number, number]; share: number }>;
   seconds: Record<string, number>;
 }
 
-export type Progress = (stage: 'conditions' | 'pano' | 'scale' | 'scene' | 'verify' | 'done', message: string) => void;
+export type Progress = (stage: 'conditions' | 'pano' | 'scale' | 'scene' | 'fill' | 'verify' | 'done', message: string) => void;
 
 const W = 2048, H = 1024;
 
@@ -64,7 +68,7 @@ export async function renderConditions(layout: Layout, dir: string) {
   return { capture, buffers: r, range, legend: sem.legend, depth, semantic, shaded };
 }
 
-export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst2Client; provider: PanoProvider; prompt?: string; signal?: AbortSignal; onProgress?: Progress }): Promise<TextSceneResult> {
+export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst2Client; provider: PanoProvider; prompt?: string; styleImage?: { bytes: Uint8Array; mime: string }; maxFills?: number; signal?: AbortSignal; onProgress?: Progress }): Promise<TextSceneResult> {
   const p = deps.onProgress ?? (() => {});
   const seconds: Record<string, number> = {};
   let t = Date.now();
@@ -79,7 +83,7 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
   lap('conditions');
 
   p('pano', `Painting the panorama (${deps.provider.label})`);
-  const pano = await deps.provider.generate({ prompt, depth: c.depth, semantic: c.semantic, shaded: c.shaded, signal: deps.signal, onProgress: (m) => p('pano', m) });
+  const pano = await deps.provider.generate({ prompt, depth: c.depth, semantic: c.semantic, shaded: c.shaded, styleImage: deps.styleImage, signal: deps.signal, onProgress: (m) => p('pano', m) });
   credits += pano.credits ?? 0;
   const panoName = pano.mime === 'image/png' ? 'panorama.png' : 'panorama.jpg';
   await writeFile(join(dir, panoName), pano.bytes);
@@ -113,9 +117,23 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
   await writeFile(join(dir, 'scene.spz'), spz);
   lap('scene');
 
+  let finalSpz = spz;
+  let batchIds = task.result!.outputBatch ? [task.result!.outputBatch.batchId] : [];
+  let fill: FillResult | null = null;
+  if ((deps.maxFills ?? 2) > 0) {
+    p('fill', 'Looking for gaps in the scene');
+    const f = await autoFill(spz, dir, { jst2: deps.jst2, sessionId, batchIds, capture: c.capture.position, maxFills: deps.maxFills ?? 2, signal: deps.signal, onProgress: (m) => p('fill', m) });
+    fill = f.result;
+    credits += f.result.credits;
+    batchIds = f.result.batchIds;
+    finalSpz = f.spz;
+    if (f.result.rounds.length) await writeFile(join(dir, 'scene.spz'), finalSpz);
+    lap('fill');
+  }
+
   p('verify', 'Checking the scene against the blockout');
   const lowRes = renderEquirect(buildScene(layout), c.capture, 256, 128);
-  const alignment = measureAlignment(readSpz(spz), lowRes, c.capture);
+  const alignment = measureAlignment(readSpz(finalSpz), lowRes, c.capture);
   lap('verify');
 
   const result: TextSceneResult = {
@@ -126,9 +144,10 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
     metersPerUnit,
     scaleSource,
     sessionId,
-    batchIds: task.result!.outputBatch ? [task.result!.outputBatch.batchId] : [],
+    batchIds,
     credits,
     alignment,
+    fill,
     files: { depth: 'depth.png', semantic: 'semantic.png', shaded: 'shaded.png', panorama: panoName, scene: 'scene.spz', layout: 'layout.json' },
     legend: c.legend,
     seconds,

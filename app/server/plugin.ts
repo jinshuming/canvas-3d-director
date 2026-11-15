@@ -3,7 +3,7 @@ import { createReadStream, existsSync } from 'node:fs';
 import { copyFile, cp, mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
-import { extname, join, normalize } from 'node:path';
+import { extname, join, normalize, sep } from 'node:path';
 import type { Plugin } from 'vite';
 
 import type { StageDoc } from '../../src/stage/types.ts';
@@ -523,6 +523,38 @@ export function directorServer(opts: DirectorServerOptions): Plugin {
     }
 
     if (p === '/api/library' && m === 'GET') return json(res, library);
+    // A scene from the scene generator (scenegen/): its files are copied in, and a generated
+    // scene keeps its Viggle session so 扩展场景 can still fill it.
+    if (p === '/api/library/import-scene' && m === 'POST') {
+      const b = await readJson(req) as { name?: string; dir?: string; spz?: string; panorama?: string | null; layout?: string | null; viggle?: { sessionId: string; batchIds: string[] } | null; source?: unknown };
+      const allowed = join(opts.dataDir, 'scenegen') + sep;
+      const src = (f: string | null | undefined) => {
+        if (!f || !b.dir) return null;
+        const full = normalize(join(b.dir, f));
+        if (!full.startsWith(allowed) || !existsSync(full)) throw httpError(400, `Not a scene generator file: ${f}`);
+        return full;
+      };
+      const spz = src(b.spz);
+      if (!spz) throw httpError(400, 'spz is required.');
+      const id = `scene_${randomUUID().slice(0, 12)}`;
+      await mkdir(filesDir, { recursive: true });
+      await copyFile(spz, join(filesDir, `${id}.spz`));
+      const pano = src(b.panorama);
+      let panoramaUrl: string | null = null;
+      if (pano) { const ext = pano.endsWith('.png') ? '.png' : '.jpg'; await copyFile(pano, join(filesDir, `${id}-pano${ext}`)); panoramaUrl = `/files/${id}-pano${ext}`; }
+      const layout = src(b.layout);
+      let layoutUrl: string | undefined;
+      if (layout) { await copyFile(layout, join(filesDir, `${id}-layout.json`)); layoutUrl = `/files/${id}-layout.json`; }
+      const scene: LibraryScene = {
+        id, name: String(b.name ?? 'Generated scene').slice(0, 60), url: `/files/${id}.spz`, panoramaUrl,
+        viggle: b.viggle && Array.isArray(b.viggle.batchIds) ? { sessionId: String(b.viggle.sessionId), batchIds: b.viggle.batchIds.map(String) } : null,
+        ...(layoutUrl ? { layoutUrl } : {}),
+        createdAt: new Date().toISOString(),
+      };
+      library.scenes.unshift(scene);
+      await saveLibrary();
+      return json(res, scene);
+    }
     if (p === '/api/h3' && m === 'POST') {
       // Multipart, parsed by the platform: the previs video can be tens of megabytes.
       const form = await new Request('http://local/', { method: 'POST', headers: req.headers as Record<string, string>, body: Readable.toWeb(req) as ReadableStream, duplex: 'half' } as RequestInit).formData();
