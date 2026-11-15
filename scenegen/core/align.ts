@@ -7,6 +7,7 @@
 import { basis, dirToEquirect, sub } from './frame.ts';
 import type { CameraPose, Vec3 } from './frame.ts';
 import type { EquirectBuffers } from './render.ts';
+import { OPEN_CLASSES } from './render.ts';
 import type { SpzPoints } from './spz.ts';
 import { distanceToFloor } from './spz.ts';
 
@@ -49,13 +50,15 @@ export function measureAlignment(points: SpzPoints, blockout: EquirectBuffers, p
   }
   const errs: number[] = [];
   let ok = 0, objN = 0, objOk = 0;
+  // What a window, a door or the sky shows has no blockout distance (it is a placeholder): leave it out.
+  const open = new Set(blockout.classes.map((c, k) => (OPEN_CLASSES.has(c) ? k : -1)).filter((k) => k >= 0));
   for (let v = 0; v < H; v++) {
     // Skip the poles: equirect bins there are tiny and noisy.
     if (v < H * 0.1 || v > H * 0.9) continue;
     for (let u = 0; u < W; u++) {
       const i = v * W + u;
       const bt = blockout.dist[i]!, st = near[i]!;
-      if (!Number.isFinite(bt) || !Number.isFinite(st) || bt > 40) continue;
+      if (!Number.isFinite(bt) || !Number.isFinite(st) || bt > 40 || open.has(blockout.cls[i]!)) continue;
       const e = Math.abs(Math.log(st / bt));
       errs.push(e);
       const good = e < Math.log(1.25);

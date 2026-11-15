@@ -161,3 +161,16 @@ test('PLY reader: binary xyz + rgb', () => {
   assert.deepEqual([...p.positions], [1, 2, 3, 4, 5, 6]);
   assert.deepEqual([...p.colors], [10, 20, 30, 40, 50, 60]);
 });
+
+test('depth range ignores what is seen through openings; openings render as no surface', () => {
+  const l = livingRoom();
+  const r = renderEquirect(buildScene(l), { position: [0, 1.5, 0.3], yaw: 90 }, 256, 128);
+  const range = depthRange(r);
+  // The room is 6 × 5 m: nothing real is farther than ~4.5 m from near the middle.
+  assert.ok(range.zMax < 6, `zMax ${range.zMax}`);
+  const d = depthImage(r, range.zMin, range.zMax);
+  const win = r.classes.indexOf('window');
+  assert.ok(win >= 0);
+  const i = r.cls.findIndex((c) => c === win);
+  assert.equal(d[i * 3], 0);
+});

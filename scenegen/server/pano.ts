@@ -20,6 +20,8 @@ export interface PanoInput {
   semantic: Uint8Array;
   shaded: Uint8Array;
   seed?: number;
+  /** Hard numbers about the space ("room 6 × 5 m, ceiling 2.8 m, camera 1.5 m up"), stated to the image model. */
+  geometry?: string;
   /** The user's input picture, if the scene came from one: the look to match. */
   styleImage?: { bytes: Uint8Array; mime: string };
   signal?: AbortSignal;
@@ -90,7 +92,7 @@ export function openaiImageProvider(cfg: { apiKey?: string; base?: string; model
       form.append('model', model);
       form.append('size', size);
       form.append('n', '1');
-      form.append('prompt', depthPrompt(input.prompt, Boolean(input.styleImage)));
+      form.append('prompt', depthPrompt(input.prompt, Boolean(input.styleImage), input.geometry));
       const depth = w / h === 2 ? input.depth : await resizeImage(input.depth, w, h, 'png');
       form.append('image[]', new Blob([depth as BlobPart], { type: 'image/png' }), 'depth-equirect.png');
       if (input.styleImage) form.append('image[]', new Blob([input.styleImage.bytes as BlobPart], { type: input.styleImage.mime }), 'style-reference.png');
@@ -109,11 +111,14 @@ export function openaiImageProvider(cfg: { apiKey?: string; base?: string; model
   };
 }
 
-export function depthPrompt(caption: string, withStyle: boolean): string {
+export function depthPrompt(caption: string, withStyle: boolean, geometry?: string): string {
   return [
-    'The first reference image is an EQUIRECTANGULAR DEPTH MAP of a 3D layout, seen from one point: brighter = nearer, black = open sky / far outside.',
+    'The first reference image is an EQUIRECTANGULAR DEPTH MAP of a 3D layout, seen from one point: brighter = nearer, black = no surface (open sky, or the view out through a window or door).',
     'Paint a photorealistic 360° equirectangular panorama of exactly that space from exactly that point: every wall, opening, piece of furniture and object where the depth map has it, at the same size and distance, with the same horizon and the same distortion toward the top and bottom. Do not add large objects the depth map does not have; small decor is fine.',
-    withStyle ? 'The second reference image shows the look to match: its materials, colours and light - not its layout.' : '',
+    'Keep the room the size the depth map shows: the walls and the ceiling stay exactly where it puts them. Do not make the room taller, deeper or wider, do not vault or raise the ceiling, and do not open up walls that are solid in the depth map.',
+    geometry ? `Measurements: ${geometry}.` : '',
+    withStyle ? 'The second reference image shows the look to match: its materials, colours and light - not its layout, and not any people, characters or creatures in it.' : '',
+    'No people, characters, figures, robots, mannequins or animals anywhere in the panorama.',
     'The left and right edges must join seamlessly.',
     caption,
   ].filter(Boolean).join('\n');
@@ -161,5 +166,32 @@ export function falFluxDepthProvider(key: string | undefined, f: typeof fetch = 
       const bytes = new Uint8Array(await img.arrayBuffer());
       return { bytes, mime: bytes[0] === 0x89 ? 'image/png' : 'image/jpeg' };
     },
+  };
+}
+
+export type PeopleCheck = (pano: Uint8Array) => Promise<{ people: boolean; note: string }>;
+
+/** Ask a vision model whether a panorama shows people (or characters, robots, animals). */
+export function peopleCheck(cfg: { apiKey?: string; base?: string; model: string }, f: typeof fetch = (...a) => globalThis.fetch(...a)): PeopleCheck | undefined {
+  if (!cfg.apiKey) return undefined;
+  return async (pano) => {
+    const small = await resizeImage(pano, 1536, 768, 'jpg');
+    const res = await f(`${(cfg.base ?? 'https://api.openai.com/v1').replace(/\/$/, '')}/responses`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${cfg.apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: cfg.model,
+        input: [{ role: 'user', content: [
+          { type: 'input_text', text: 'This is a 360° equirectangular panorama of a place. Does it show any person, character, figure, statue of a person, robot, mannequin or animal? Answer with JSON only: {"people": true|false, "note": "what and where, or empty"}.' },
+          { type: 'input_image', image_url: `data:image/jpeg;base64,${Buffer.from(small).toString('base64')}` },
+        ] }],
+        text: { format: { type: 'json_object' } },
+      }),
+    });
+    const body = await res.json().catch(() => null) as { output?: Array<{ type: string; content?: Array<{ type: string; text?: string }> }>; error?: { message?: string } } | null;
+    if (!res.ok) throw new Error(body?.error?.message ?? `vision ${res.status}`);
+    const text = body?.output?.flatMap((o) => o.content ?? []).find((c) => c.type === 'output_text')?.text ?? '{}';
+    const j = JSON.parse(text) as { people?: boolean; note?: string };
+    return { people: Boolean(j.people), note: String(j.note ?? '') };
   };
 }

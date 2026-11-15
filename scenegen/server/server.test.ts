@@ -14,7 +14,7 @@ import { findCapturePoint } from '../core/capture.ts';
 import { poseToC2W } from '../core/frame.ts';
 import { readSpz } from '../core/spz.ts';
 import { emptyLayout } from '../core/types.ts';
-import { gapPose } from './fill.ts';
+import { fillBudget, gapPose } from './fill.ts';
 import { Jst2Client, Jst2Error } from './jst2.ts';
 import { createMockJst2, MOCK_PREFIX } from './mockjst2.ts';
 import { depthPrompt, openaiImageProvider } from './pano.ts';
@@ -166,4 +166,16 @@ test('gap view → camera pose in our convention', () => {
   const pose = gapPose({ id: 'g1', priority: 1, role: 'hole', position: [1, 2, 3], forward: [Math.sin(Math.PI / 3) * Math.cos(Math.PI / 6), -0.5, -Math.cos(Math.PI / 3) * Math.cos(Math.PI / 6)], yaw: 0, pitch: -30, hole: 0.1, blur: 0, magnification: 1 });
   assert.ok(Math.abs(pose.yaw - 60) < 1e-6);
   assert.ok(Math.abs(pose.pitch! + 30) < 1e-6);
+});
+
+test('fill budget grows with the space; the image prompt states sizes and forbids people', () => {
+  assert.equal(fillBudget(20), 1);
+  assert.equal(fillBudget(48), 2);
+  assert.equal(fillBudget(80), 3);
+  assert.equal(fillBudget(null), 3);
+  const p = depthPrompt('cap', true, 'an interior 6 m wide');
+  assert.match(p, /Measurements: an interior 6 m wide/);
+  assert.match(p, /do not vault or raise the ceiling/);
+  assert.match(p, /No people, characters/);
+  assert.match(p, /not any people, characters or creatures in it/);
 });

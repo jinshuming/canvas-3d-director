@@ -44,10 +44,20 @@ export function renderEquirect(scene: Scene, pose: CameraPose, width: number, he
   return { width, height, dist, obj, cls, classes, normal };
 }
 
-/** A depth range that fits the render: the nearest and the 99th-percentile farthest surface. */
+/** Classes whose ray distance is a placeholder, not a surface: what is seen through an opening, and sky. */
+export const OPEN_CLASSES = new Set(['window', 'door', 'sky']);
+
+/**
+ * A depth range that fits the render: the nearest and the 99th-percentile
+ * farthest REAL surface. Openings and sky are left out: counted in, the 60 m
+ * behind a window squeezes a whole room into a few grey levels, and the image
+ * model then paints the room taller and deeper than the blockout (measured on
+ * the first end-to-end run: ceilings at 1.6-2.1×).
+ */
 export function depthRange(r: EquirectBuffers): { zMin: number; zMax: number } {
   const v: number[] = [];
-  for (let i = 0; i < r.dist.length; i += 7) if (Number.isFinite(r.dist[i]!)) v.push(r.dist[i]!);
+  const open = new Set(r.classes.map((c, k) => (OPEN_CLASSES.has(c) ? k : -1)).filter((k) => k >= 0));
+  for (let i = 0; i < r.dist.length; i += 7) if (Number.isFinite(r.dist[i]!) && !open.has(r.cls[i]!)) v.push(r.dist[i]!);
   v.sort((a, b) => a - b);
   const zMin = Math.max(0.1, (v[0] ?? 0.3) * 0.9);
   const zMax = Math.max(zMin * 2, (v[Math.floor(v.length * 0.99)] ?? 60) * 1.1);
@@ -58,9 +68,11 @@ export function depthRange(r: EquirectBuffers): { zMin: number; zMax: number } {
 export function depthImage(r: EquirectBuffers, zMin = 0.3, zMax = 60): Uint8Array {
   const out = new Uint8Array(r.width * r.height * 3);
   const lmin = Math.log(zMin), span = Math.log(zMax) - lmin;
+  const open = new Set(r.classes.map((c, k) => (OPEN_CLASSES.has(c) ? k : -1)).filter((k) => k >= 0));
   for (let i = 0; i < r.dist.length; i++) {
     const t = r.dist[i]!;
-    const v = Number.isFinite(t) ? Math.round(255 * Math.max(1 / 255, Math.min(1, 1 - (Math.log(Math.max(t, zMin)) - lmin) / span))) : 0;
+    // Openings and sky: no surface (0), like Atlas's convention for sky.
+    const v = Number.isFinite(t) && !open.has(r.cls[i]!) ? Math.round(255 * Math.max(1 / 255, Math.min(1, 1 - (Math.log(Math.max(t, zMin)) - lmin) / span))) : 0;
     out[i * 3] = out[i * 3 + 1] = out[i * 3 + 2] = v;
   }
   return out;
