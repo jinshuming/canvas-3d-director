@@ -10,7 +10,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 
-import { api as sg, file } from '../../scenegen/web/api.ts';
+import { api as sg, file, toDataUrl } from '../../scenegen/web/api.ts';
 import type { Project } from '../../scenegen/web/api.ts';
 import { generateScene, reconstructScene, STAGE_LABEL, watchProject } from '../../scenegen/web/runner.ts';
 import type { RunStatus } from '../../scenegen/web/runner.ts';
@@ -36,7 +36,7 @@ function useProject(id: string | undefined) {
 }
 
 /** Export the project's scene, make a World whose stage has it, and say which. */
-async function sendToWorld(project: Project): Promise<{ worldId: string; title: string }> {
+async function sendToWorld(project: Project, cover: string | null): Promise<{ worldId: string; title: string }> {
   const { sceneId } = await sg.exportScene(project.id);
   const lib = await api.library();
   const scene = lib.scenes.find((s) => s.id === sceneId);
@@ -44,6 +44,8 @@ async function sendToWorld(project: Project): Promise<{ worldId: string; title: 
   const world = await api.createWorld({ title: project.title });
   const stage = await api.getStage(world.id);
   await api.saveStage({ ...stage, title: project.title, scene: { name: scene.name, url: scene.url, placement: null, viggle: scene.viggle, panoramaUrl: scene.panoramaUrl } }, stage.version);
+  // The World node shows a cover: the panorama, or a frame of the video, until the editor saves its own.
+  if (cover) await api.saveCover(world.id, await toDataUrl(cover, 960)).catch(() => {});
   return { worldId: world.id, title: world.title };
 }
 
@@ -60,13 +62,13 @@ function Progress({ project, local }: { project: Project | null; local: RunStatu
   );
 }
 
-function ResultActions({ project, onSendToWorld }: { project: Project; onSendToWorld: Props['onSendToWorld'] }) {
+function ResultActions({ project, cover, onSendToWorld }: { project: Project; cover: string | null; onSendToWorld: Props['onSendToWorld'] }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   return (
     <div className="cv-sg-actions">
       <button className="cv-sg-btn" onClick={() => window.open(`/scenegen/index.html#${project.id}`, '_blank')}>查看 3D</button>
-      <button className="cv-sg-btn primary" disabled={busy} onClick={() => { setBusy(true); setErr(null); void sendToWorld(project).then(onSendToWorld).catch((e) => setErr((e as Error).message)).finally(() => setBusy(false)); }}>
+      <button className="cv-sg-btn primary" disabled={busy} onClick={() => { setBusy(true); setErr(null); void sendToWorld(project, cover).then(onSendToWorld).catch((e) => setErr((e as Error).message)).finally(() => setBusy(false)); }}>
         {busy ? '发送中…' : project.exported ? '再送一个 World' : '送到 World'} <Icon name="arrowRight" size={13} />
       </button>
       {err && <small className="cv-sg-err">{err}</small>}
@@ -145,7 +147,7 @@ export function SceneGenCard({ node, inputs, onPatch, onSendToWorld }: Props) {
       )}
       <div className="cv-sg-foot">
         {running ? <Progress project={project} local={local} />
-          : done ? <ResultActions project={project!} onSendToWorld={onSendToWorld} />
+          : done ? <ResultActions project={project!} cover={file(project!.id, `out/${result!.files!.panorama!}`)} onSendToWorld={onSendToWorld} />
           : (
             <>
               <button className="cv-enter cv-sg-go" disabled={!node.projectId || (!prompt.trim() && !media && !linkedImage)} onClick={() => void run()}>生成场景 <Icon name="sparkle" size={14} /></button>
@@ -212,7 +214,7 @@ export function SceneReconCard({ node, onSendToWorld }: Props) {
       )}
       <div className="cv-sg-foot">
         {running ? <Progress project={project} local={local} />
-          : done ? <ResultActions project={project!} onSendToWorld={onSendToWorld} />
+          : done ? <ResultActions project={project!} cover={views?.first ?? null} onSendToWorld={onSendToWorld} />
           : (
             <>
               <button className="cv-enter cv-sg-go" disabled={!video && !project?.video} onClick={() => void run()}>重建场景 <Icon name="camera" size={14} /></button>
