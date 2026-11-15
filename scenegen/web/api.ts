@@ -39,6 +39,7 @@ export const api = {
   conditions: (id: string) => call<Conditions>('POST', `/projects/${id}/conditions`),
   capture: (id: string) => call<CaptureResult>('POST', `/projects/${id}/capture`),
   generate: (id: string, body: { provider?: string; maxFills?: number; useReference?: boolean }) => call<Job>('POST', `/projects/${id}/generate`, body),
+  layoutVideo: (id: string, file: Blob) => call<{ frames: Array<{ file: string; time: number; url: string }> }>('PUT', `/projects/${id}/layout-video`, undefined, { body: file, type: file.type || 'video/mp4' }),
   reference: (id: string, file: Blob) => call<{ url: string }>('PUT', `/projects/${id}/reference`, undefined, { body: file, type: file.type }),
   video: (id: string, file: Blob) => call<{ file: string; bytes: number }>('PUT', `/projects/${id}/video`, undefined, { body: file, type: file.type || 'video/mp4' }),
   videoRun: (id: string, body: { square?: number }) => call<Job>('POST', `/projects/${id}/video-run`, body),

@@ -39,7 +39,7 @@ main { flex: 1; min-width: 0; overflow: hidden; }
 .composer { border-top: 1px solid var(--line); padding: 8px; display: flex; flex-direction: column; gap: 6px; }
 .composer textarea { width: 100%; height: 68px; resize: vertical; border: 1px solid var(--line); border-radius: 6px; padding: 6px; }
 .attached { position: relative; width: 90px; }
-.attached img { width: 90px; border-radius: 6px; display: block; }
+.attached img, .attached video { width: 90px; border-radius: 6px; display: block; }
 .attached button { position: absolute; top: 2px; right: 2px; padding: 0 5px; }
 .file-btn { border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; cursor: pointer; background: #fff; display: inline-block; }
 .file-btn input { display: none; }

@@ -59,7 +59,7 @@ export const AGENT_TOOLS = [
   { name: 'look', description: 'See the blockout as the panorama will frame it: a clay 360° render from the capture point (searched if unset), plus the prompt it would be painted with.', parameters: { type: 'object', properties: {} } },
   { name: 'choose_capture_point', description: 'Search the best place to stand for the panorama (sees the important objects unoccluded, at a good distance, with floor in view) and set it.', parameters: { type: 'object', properties: {} } },
   { name: 'set_capture_point', description: 'Set the capture point by hand: [x, z] at eye height, and the yaw the panorama centre faces (0 north, 90 east).', parameters: { type: 'object', properties: { position: { type: 'array', items: NUM }, yaw: NUM }, required: ['position'] } },
-  { name: 'generate_scene', description: 'Paint the panorama from the blockout and build the 3D scene with JST-2 (about 12 credits, about a minute). The page shows the progress.', parameters: { type: 'object', properties: { provider: { type: 'string', enum: ['jst2-reference', 'fal-flux-depth'] } } } },
+  { name: 'generate_scene', description: 'Paint the panorama from the blockout (GPT-image-2 from the equirect depth map by default) and build the 3D scene with JST-2, then fill its worst gaps (about 25 credits, 2-3 minutes). The page shows the progress. Leave provider out unless the user asked for one.', parameters: { type: 'object', properties: { provider: { type: 'string', enum: ['openai-image', 'jst2-reference', 'fal-flux-depth'] } } } },
 ] as const;
 
 export const OPENAI_TOOLS = AGENT_TOOLS.map((t) => ({ type: 'function', name: t.name, description: t.description, parameters: t.parameters }));

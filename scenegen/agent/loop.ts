@@ -57,7 +57,9 @@ export async function runAgentTurn(text: string, host: AgentHost, opts: { respon
   let previousId = opts.previousId ?? null;
   const pictures = opts.images ?? [];
   // A picture from the user is the scene to rebuild: say so, so the model lays it out from the picture.
-  const lead = pictures.length ? `${text || 'Build this place.'}\n\n[The attached picture is the place to build: read its layout - the room or ground, every major object, where each stands and faces, and their sizes - and lay out the blockout to match it from a similar viewpoint. Take the style from it too.]` : text;
+  const lead = !pictures.length ? text : pictures.length === 1
+    ? `${text || 'Build this place.'}\n\n[The attached picture is the place to build: read its layout - the room or ground, every major object, where each stands and faces, and their sizes - and lay out the blockout to match it from a similar viewpoint. Take the style from it too.]`
+    : `${text || 'Build this place.'}\n\n[The ${pictures.length} attached pictures are frames of ONE walkthrough video of the place to build, in time order. The camera moves, so the same object appears in several frames from different sides: merge them into one layout - the room or ground, every major object once, where each stands and faces, their sizes, and how they relate (what is next to, in front of, on what). Take the style from them too.]`;
   let input: unknown[] = [{ role: 'user', content: [{ type: 'input_text', text: lead }, ...pictures.map((u) => ({ type: 'input_image', image_url: u }))] }];
   opts.emit({ role: 'user', text: text || '(picture)', ...(pictures[0] ? { image: pictures[0] } : {}) });
   for (let step = 0; step < MAX_STEPS; step++) {
