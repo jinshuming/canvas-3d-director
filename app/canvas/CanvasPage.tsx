@@ -6,6 +6,9 @@ import type { IconName } from '../icons.tsx';
 import { Icon } from '../icons.tsx';
 import { navigate, worldPath } from '../router.ts';
 import './canvas.css';
+import { api as sg } from '../../scenegen/web/api.ts';
+import type { NodeInputs } from './SceneNodes.tsx';
+import { SceneGenCard, SceneReconCard } from './SceneNodes.tsx';
 import type { CanvasNode, CanvasState, NodeKind } from './model.ts';
 import { loadCanvas, newId, NODE_LABEL, NODE_SIZE, saveCanvas } from './model.ts';
 
@@ -131,6 +134,12 @@ export function CanvasPage() {
     const [w, h] = NODE_SIZE[kind];
     const c = centre();
     const node: CanvasNode = { id: newId(), kind, x: c.x - w / 2 + (Math.random() - 0.5) * 60, y: c.y - h / 2 + (Math.random() - 0.5) * 60, w, h, ...extra };
+    if ((kind === 'scenegen' || kind === 'scenerecon') && !node.projectId) {
+      // Every scene node is its own scene generator project, kept on the server.
+      const p = await sg.create(kind === 'scenerecon' ? 'video' : 'text', { title: kind === 'scenerecon' ? `场景重建 ${state.nodes.filter((n) => n.kind === kind).length + 1}` : `场景生成 ${state.nodes.filter((n) => n.kind === kind).length + 1}` });
+      node.projectId = p.id;
+      node.title = p.title;
+    }
     if (kind === 'world' && !node.worldId) {
       // Every World node is its own project file.
       const w = await api.createWorld({ title: `World ${state.nodes.filter((n) => n.kind === 'world').length + 1}` });
@@ -161,6 +170,20 @@ export function CanvasPage() {
   };
 
   const byId = new Map(state.nodes.map((n) => [n.id, n]));
+  /** What flows into a node: the text of Text nodes and the picture of Image nodes wired to it. */
+  const inputsOf = (id: string): NodeInputs => {
+    const from = state.edges.filter((e) => e.to === id).map((e) => byId.get(e.from)).filter((n): n is CanvasNode => Boolean(n));
+    return { text: from.filter((n) => n.kind === 'text' && n.text?.trim()).map((n) => n.text!.trim()).join('\n'), imageSrc: from.find((n) => n.kind === 'image' && n.src)?.src ?? null };
+  };
+  /** A scene node's result went to a new World: put a World node to its right, wired from it. */
+  const addWorldAfter = (from: CanvasNode, w: { worldId: string; title: string }) => {
+    const [nw, nh] = NODE_SIZE.world;
+    const node: CanvasNode = { id: newId(), kind: 'world', x: from.x + from.w + 120, y: from.y + (from.h - nh) / 2, w: nw, h: nh, worldId: w.worldId, title: w.title };
+    setState((s) => ({ ...s, nodes: [...s.nodes, node], edges: [...s.edges, { from: from.id, to: node.id }] }));
+    void api.listWorlds().then((list) => setWorlds(new Map(list.map((x) => [x.id, x])))).catch(() => {});
+    setSelected(node.id);
+  };
+  const patchNode = (id: string, patch: Partial<CanvasNode>) => setState((s) => ({ ...s, nodes: s.nodes.map((k) => (k.id === id ? { ...k, ...patch } : k)) }));
 
   return (
     <div className="cv-root" style={{ '--cv-ui': ui } as React.CSSProperties}>
@@ -178,7 +201,10 @@ export function CanvasPage() {
           </svg>
           {state.nodes.map((n) => (
             <NodeView key={n.id} node={n} world={n.worldId ? worlds?.get(n.worldId) ?? (worlds ? null : undefined) : null} selected={selected === n.id} onPointerDown={(e) => onNodePointerDown(e, n)}
-              onText={(text) => setState((s) => ({ ...s, nodes: s.nodes.map((k) => (k.id === n.id ? { ...k, text } : k)) }))} />
+              onText={(text) => setState((s) => ({ ...s, nodes: s.nodes.map((k) => (k.id === n.id ? { ...k, text } : k)) }))}
+              inputs={n.kind === 'scenegen' || n.kind === 'scenerecon' ? inputsOf(n.id) : undefined}
+              onPatch={(patch) => patchNode(n.id, patch)}
+              onSendToWorld={(w) => addWorldAfter(n, w)} />
           ))}
         </div>
 
@@ -218,6 +244,8 @@ export function CanvasPage() {
             <MenuRow icon="audio" title="Audio" dot onClick={() => setMenu(false)} />
             <MenuRow icon="box" title="3D" dot onClick={() => void add('3d')} />
             <MenuRow icon="globe" title="World" badge="New" dot onClick={() => void add('world')} />
+            <MenuRow icon="scene" title="场景生成" sub="文本 / 图片 / 视频 → 3D 场景" badge="New" onClick={() => void add('scenegen')} />
+            <MenuRow icon="camera" title="场景重建" sub="视频 → 3D 场景" badge="New" onClick={() => void add('scenerecon')} />
             <div className="cv-menu-head">Utilities</div>
             <MenuRow icon="film" title="Timeline Editor" badge="Beta" dot onClick={() => setMenu(false)} />
             <MenuRow icon="previs" title="3D Studio" chevron dot onClick={() => void add('previs')} />
@@ -255,10 +283,10 @@ function MenuRow({ icon, title, sub, hot, dot, badge, chevron, onClick }: { icon
   );
 }
 
-const KIND_ICON: Record<NodeKind, IconName> = { image: 'image', video: 'video', '3d': 'box', text: 'text', previs: 'previs', world: 'globe' };
+const KIND_ICON: Record<NodeKind, IconName> = { image: 'image', video: 'video', '3d': 'box', text: 'text', previs: 'previs', world: 'globe', scenegen: 'scene', scenerecon: 'camera' };
 
 /** `world`: the World node's project - undefined while loading, null when it is gone. */
-function NodeView({ node: n, world, selected, onPointerDown, onText }: { node: CanvasNode; world: WorldSummary | null | undefined; selected: boolean; onPointerDown: (e: React.PointerEvent) => void; onText: (t: string) => void }) {
+function NodeView({ node: n, world, selected, onPointerDown, onText, inputs, onPatch, onSendToWorld }: { node: CanvasNode; world: WorldSummary | null | undefined; selected: boolean; onPointerDown: (e: React.PointerEvent) => void; onText: (t: string) => void; inputs?: NodeInputs; onPatch: (p: Partial<CanvasNode>) => void; onSendToWorld: (w: { worldId: string; title: string }) => void }) {
   return (
     <div className={`cv-node cv-${n.kind} ${selected ? 'selected' : ''}`} style={{ left: n.x, top: n.y, width: n.w, height: n.h }} onPointerDown={onPointerDown}
       onDoubleClick={() => { if (n.kind === 'world' && world) navigate(worldPath(world.id, n.id)); }}>
@@ -272,6 +300,8 @@ function NodeView({ node: n, world, selected, onPointerDown, onText }: { node: C
       {n.kind === 'text' && <textarea className="cv-node-text" placeholder="Write something…" value={n.text ?? ''} onChange={(e) => onText(e.target.value)} />}
       {n.kind === 'previs' && <div className="cv-node-empty cv-col"><Icon name="previs" size={20} /><span className="cv-mini-btn">Enter Studio</span></div>}
       {n.kind === 'world' && <WorldCard node={n} world={world} />}
+      {n.kind === 'scenegen' && <SceneGenCard node={n} inputs={inputs ?? { text: '', imageSrc: null }} onPatch={onPatch} onSendToWorld={onSendToWorld} />}
+      {n.kind === 'scenerecon' && <SceneReconCard node={n} inputs={inputs ?? { text: '', imageSrc: null }} onPatch={onPatch} onSendToWorld={onSendToWorld} />}
     </div>
   );
 }
