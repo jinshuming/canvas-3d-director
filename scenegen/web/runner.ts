@@ -4,10 +4,7 @@
  * server (like a World node = one World), so its progress and result survive
  * a reload; the agent turn runs in the page that started it.
  */
-import { runAgentTurn } from '../agent/loop.ts';
-import type { Layout } from '../core/types.ts';
-import { projectHost } from './agentHost.ts';
-import { api, toDataUrl } from './api.ts';
+import { api } from './api.ts';
 import type { Job, Project } from './api.ts';
 
 export type RunPhase = 'idle' | 'uploading' | 'agent' | 'generating' | 'done' | 'failed';
@@ -15,41 +12,25 @@ export interface RunStatus { phase: RunPhase; message: string; progress: number 
 
 export interface SceneInputs { text: string; image?: Blob | null; video?: Blob | null }
 
-/** Text / picture / video → agent lays out the blockout → generation job (panorama, JST-2, gap fill). */
+/**
+ * Text / picture / video → the fast blockout (one structured model call, deterministic placement)
+ * → generation: panorama, then the environment (JST-2, gap fill) and the key objects (SAM 3D) side
+ * by side, composed by the blockout.
+ */
 export async function generateScene(projectId: string, inputs: SceneInputs, onStatus: (s: RunStatus) => void): Promise<Job> {
-  const pics: string[] = [];
   if (inputs.video) {
     onStatus({ phase: 'uploading', message: '上传视频，抽取关键帧', progress: 0.02 });
-    const k = await api.layoutVideo(projectId, inputs.video);
-    for (const f of k.frames) pics.push(await toDataUrl(f.url, 768));
+    await api.layoutVideo(projectId, inputs.video);
   } else if (inputs.image) {
     onStatus({ phase: 'uploading', message: '上传图片', progress: 0.02 });
     await api.reference(projectId, inputs.image);
-    pics.push(await toDataUrl(inputs.image, 1280));
   }
-  const layout: Layout = (await api.get(projectId)).layout;
-  const host = projectHost(projectId, layout, { toDataUrl });
-  let tools = 0;
-  onStatus({ phase: 'agent', message: 'Agent 正在理解输入、摆放白模', progress: 0.05 });
-  await runAgentTurn(inputs.text.trim(), host, {
-    respond: api.respondAgent,
-    emit: (it) => {
-      if (it.role !== 'tool') return;
-      tools++;
-      onStatus({ phase: 'agent', message: `Agent：${TOOL_LABEL[it.name] ?? it.name}（${layout.objects.length} 个物体）`, progress: Math.min(0.12, 0.05 + tools * 0.005) });
-    },
-    images: pics,
-  });
-  // The agent is asked to start generation; if it stopped short, start it so the node finishes.
-  if (!host.job()) {
-    if (!layout.objects.length) throw new Error('Agent 没有摆出任何物体，换个说法再试一次。');
-    await host.generate();
-  }
-  await api.put(projectId, { layout, title: layout.title });
-  return host.job()!;
+  onStatus({ phase: 'agent', message: '理解输入，摆放白模', progress: 0.05 });
+  const q = await api.quickLayout(projectId, { text: inputs.text, useVideo: Boolean(inputs.video), useReference: Boolean(inputs.image) });
+  if (!q.layout.objects.length) throw new Error('没有摆出任何物体，换个说法再试一次。');
+  onStatus({ phase: 'generating', message: `白模：${q.layout.objects.length} 个物体（${q.keys.length} 个关键物体），${(q.seconds.model + q.seconds.place).toFixed(0)} 秒`, progress: 0.08 });
+  return api.generate(projectId, {});
 }
-
-const TOOL_LABEL: Record<string, string> = { set_room: '建房间', set_outdoor: '设室外场地', add_opening: '开门窗', place_objects: '摆放物体', update_object: '调整物体', check_layout: '检查布局', set_style: '设定风格', look: '查看白模', choose_capture_point: '选拍摄点', generate_scene: '开始生成' };
 
 /** Video → poses (COLMAP) → posed-images → scene. */
 export async function reconstructScene(projectId: string, video: Blob, onStatus: (s: RunStatus) => void): Promise<Job> {
@@ -74,6 +55,6 @@ export function watchProject(projectId: string, onProject: (p: Project) => void,
 }
 
 export const STAGE_LABEL: Record<string, string> = {
-  start: '开始', conditions: '渲染白模', pano: '生成全景图', scale: '测量尺度', scene: 'JST-2 建场景', fill: '检测并补缺口', verify: '校验', done: '完成',
+  start: '开始', conditions: '渲染白模', pano: '生成全景图', erase: '擦除物体', scale: '测量尺度', scene: 'JST-2 建环境', fill: '检测并补缺口', objects: 'SAM 3D 生成物体', compose: '合成', verify: '校验', done: '完成',
   probe: '读取视频', sample: '抽帧', colmap: 'COLMAP 估计位姿', normalise: '重力与尺度', select: '挑选视角', write: '写出图片+位姿', upload: '上传 JST-2',
 };

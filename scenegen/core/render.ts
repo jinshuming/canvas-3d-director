@@ -139,3 +139,37 @@ export function objectCoverage(r: EquirectBuffers, count: number): Array<{ sr: n
   for (const c of out) if (c.sr > 0) c.meanDist /= c.sr;
   return out;
 }
+
+/**
+ * RGBA mask over an equirect render: transparent (alpha 0) over each of `objs` (object indices) -
+ * its bounding box in the panorama, widened by `margin` of its size on every side (the painted
+ * object drifts a little from the blockout) and down to its contact shadow - opaque elsewhere.
+ * Boxes that cross the panorama's seam wrap around.
+ */
+export function objectMask(r: EquirectBuffers, objs: Set<number>, margin = 0.2): Uint8Array {
+  const { width: w, height: h } = r;
+  const out = new Uint8Array(w * h * 4).fill(255);
+  for (const id of objs) {
+    // Columns: the object's run around the circle; rows: its min/max.
+    const cols = new Uint8Array(w);
+    let y0 = h, y1 = -1;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (r.obj[y * w + x] === id) { cols[x] = 1; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+    if (y1 < 0) continue;
+    // The widest empty stretch of columns is outside the object; the object spans the rest.
+    let gapStart = 0, gapLen = 0;
+    for (let x = 0; x < w; x++) {
+      if (cols[x] || !cols[(x - 1 + w) % w]) continue;
+      let len = 0;
+      while (len < w && !cols[(x + len) % w]) len++;
+      if (len > gapLen) { gapLen = len; gapStart = x; }
+    }
+    const x0 = (gapStart + gapLen) % w, span = w - gapLen;
+    const mx = Math.round(span * margin) + 6, my = Math.round((y1 - y0) * margin) + 6;
+    const top = Math.max(0, y0 - my), bottom = Math.min(h - 1, y1 + my * 2);
+    for (let k = -mx; k < span + mx; k++) {
+      const x = (((x0 + k) % w) + w) % w;
+      for (let y = top; y <= bottom; y++) out[(y * w + x) * 4 + 3] = 0;
+    }
+  }
+  return out;
+}

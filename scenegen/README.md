@@ -4,7 +4,7 @@
 
 | 入口 | 流程 |
 |---|---|
-| **文本 / 图片 / 视频 → 场景** | agent 读懂输入（视频取 6 张关键帧），用白模资产摆出布局 → 自动选拍摄点 → 渲染等距深度图和白模图 → GPT-image-2 并行画 3 张全景，按与白模的对齐分和人物检查选 1 张（用户的图片不发给出图模型，只通过 agent 的风格文字传达，否则模型会照抄图片构图）→ JST-2 `custom-pano` 建场景 → 检测缺口，按场景大小自动补视角（`generate` + `reconstruct`） |
+| **文本 / 图片 / 视频 → 场景** | **快速白模**：一次结构化模型调用给出房间、开口、物体（含相对关系、关键物体标记）和风格，确定性地摆放、推开重叠、选拍摄点（约 15 秒；之后的对话由 agent 改白模）→ 渲染等距深度图和白模图 → GPT-image-2 并行画 3 张全景，按与白模的对齐分和人物检查选 1 张 → **分两路**：① 环境：用白模给出的遮罩把关键物体（及挤在它们周围的物体）从全景里擦掉 → JST-2 `custom-pano` 建环境 → 检测缺口自动补视角，得到 `environment.spz`；② 物体：每个关键物体按白模位置从全景切透视图、投影框作提示 → fal SAM 3D 生成高斯物体 → 精简到 15 万个 → 按白模的尺寸和位置拟合，得到 `objects/<id>.spz` → 按白模空间关系组合成 `scene.spz`，3D 查看器分层加载（可单独开关环境 / 每个物体） |
 | **视频 → 场景** | 抽帧（去模糊、按重叠度选关键帧）→ COLMAP 估计位姿 → 重力对齐、按相机高 1.5 m 定尺度 → 选出 ≤ 40 张图片 + 位姿 → JST-2 `posed-images`（**接口待开放，目前由内置 mock 代替**） |
 
 方案和调研见 `docs/SCENEGEN_DESIGN.md`、`docs/ATLAS_ANALYSIS.md`。
@@ -21,9 +21,9 @@ npm run dev            # http://localhost:5193/scenegen/
 | key | 用途 | 没有时 |
 |---|---|---|
 | `VIGGLE_API_KEY` | JST-2：建场景、补缺口 | 不能生成 |
+| `FAL_KEY` | SAM 3D 生成关键物体；可选的 FLUX.1 Depth 全景图 | 关键物体不单独生成（整个场景一份 3DGS）；FLUX 选项不可用 |
 | `OPENAI_API_KEY` | 布局 agent（`OPENAI_MODEL`，默认 gpt-6-luna）和 GPT-image-2 全景图 | agent 不可用；全景图可以改用「JST-2（白模作参考）」 |
 | `SCENEGEN_IMAGE_MODEL` | 全景图模型，默认 `gpt-image-2` | — |
-| `FAL_KEY` | 可选：FLUX.1 Depth 全景图 | 该选项不可用 |
 | `SCENEGEN_POSED_IMAGES_BASE` | posed-images 接口上线后填它的地址（例如 `https://apis.viggle.ai`） | 用内置 mock |
 
 视频管线（Python）：
