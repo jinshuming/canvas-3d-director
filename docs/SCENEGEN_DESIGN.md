@@ -1,5 +1,11 @@
 # 场景生成模块（scenegen）方案
 
+> **实现状态（2026-11-15，分支 `atlas-workflow`）**：两条路径都已实现并测试，代码在 `scenegen/`，用法见 `scenegen/README.md`。和本方案的不同之处：
+> - 全景图默认用 GPT-image-2，以等距深度图作为参考图（§2.4 的方案 C 的变体）；JST-2 自己出全景（方案 D）作为备选。实测方案 D 对布局的遵循出乎意料地好。
+> - 场景文件以拍摄点为原点（不是白模世界的原点），以兼容导演台的摆放和补全。
+> - 生成后自动检测缺口并补视角（复用 PINOC 的检测逻辑）。
+> - 视频路径的 posed-images 接口先由内置 mock 代替；接口规格见 `scenegen/README.md`。
+
 分支 `atlas-workflow`，2026-11-15。参考了 Atlas（见 `docs/ATLAS_ANALYSIS.md`）和 JST-2 的接口说明（`/v1/scenes/*` 的 OpenAPI 与接入指南）。
 
 **目标**：做一个和导演台解耦、只负责生成 3D 场景的模块，有两个入口：
