@@ -8,6 +8,8 @@ import type { Plugin } from 'vite';
 
 import type { StageDoc } from '../../src/stage/types.ts';
 import { AGENT_INSTRUCTIONS } from '../shared/agentPrompt.ts';
+import { relayResponses } from './openaiRelay.ts';
+import type { TurnBody } from './openaiRelay.ts';
 import type { GenJob, Library, LibraryCharacter, LibraryMotion, LibraryScene } from '../shared/library.ts';
 import { H3_ASPECT, H3_MAX_SECONDS, H3_MIN_SECONDS, H3_RESOLUTIONS, h3Credits } from '../shared/library.ts';
 import type { WorldChat, WorldFile } from '../shared/world.ts';
@@ -401,38 +403,7 @@ export function directorServer(opts: DirectorServerOptions): Plugin {
     // sends their results back as the next turn's input, chained by previous_response_id.
     if (p === '/api/agent/respond' && m === 'POST') {
       const ai = opts.openai;
-      if (!ai?.apiKey) throw httpError(503, 'OPENAI_API_KEY is not set on the server.');
-      const body = await readJson(req) as { input: unknown; previous_response_id?: string; tools: unknown[]; tool_choice?: string };
-      const upstream = await fetch(`${ai.base ?? 'https://api.openai.com/v1'}/responses`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${ai.apiKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: ai.model,
-          instructions: AGENT_INSTRUCTIONS,
-          input: body.input,
-          tools: body.tools,
-          ...(body.tool_choice ? { tool_choice: body.tool_choice } : {}),
-          ...(body.previous_response_id ? { previous_response_id: body.previous_response_id } : {}),
-          store: true,
-          stream: true,
-        }),
-      });
-      if (!upstream.ok || !upstream.body) {
-        const text = await upstream.text();
-        let msg = `OpenAI ${upstream.status}`;
-        try { msg = (JSON.parse(text) as { error?: { message?: string } }).error?.message ?? msg; } catch { /* not JSON */ }
-        throw httpError(upstream.status === 401 ? 502 : upstream.status, msg);
-      }
-      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
-      const reader = upstream.body.getReader();
-      req.on('close', () => { void reader.cancel().catch(() => {}); });
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        res.write(value);
-      }
-      res.end();
-      return true;
+      return relayResponses(req, res, ai && { apiKey: ai.apiKey, base: ai.base, model: ai.model, instructions: AGENT_INSTRUCTIONS }, await readJson(req) as TurnBody);
     }
 
     if (p === '/api/worlds' && m === 'GET') return json(res, await listWorlds());

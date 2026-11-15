@@ -99,14 +99,6 @@ function half(bits: number): number {
 }
 
 /**
- * Which way is up in this file. PINOC's rule: an SPZ of version 4 or more from
- * the provider stores +Y up; older files (and .ply) are Y down.
- */
-export function spzUp(version: number): 1 | -1 {
-  return version >= 4 ? 1 : -1;
-}
-
-/**
  * Distance from a point straight down to the nearest dense, opaque surface: march a thin
  * column of the cloud along `down` and return the first bin that holds enough points.
  * Used to read a scene's scale off its file (a capture point is ~1.5 m above the floor).
@@ -133,18 +125,4 @@ export function distanceToFloor(p: SpzPoints, origin: [number, number, number], 
   // The floor is the LAST dense layer below the point: a table or a rug sits above it.
   for (let i = bins.length - 1; i >= 0; i--) if (bins[i]! >= peak * 0.25) return (i + 0.5) * binSize;
   return null;
-}
-
-/** Axis-aligned bounds of the opaque points, trimmed to the 1st-99th percentile per axis. */
-export function robustBounds(p: SpzPoints, q = 0.01): { min: [number, number, number]; max: [number, number, number] } {
-  const min: [number, number, number] = [0, 0, 0];
-  const max: [number, number, number] = [0, 0, 0];
-  for (let axis = 0; axis < 3; axis++) {
-    const v: number[] = [];
-    for (let i = 0; i < p.count; i += Math.max(1, Math.floor(p.count / 200000))) if (p.alphas[i]! >= 0.3) v.push(p.positions[i * 3 + axis]!);
-    v.sort((a, b) => a - b);
-    min[axis] = v[Math.floor(v.length * q)] ?? 0;
-    max[axis] = v[Math.floor(v.length * (1 - q))] ?? 0;
-  }
-  return { min, max };
 }

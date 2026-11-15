@@ -9,7 +9,7 @@
  * group, so the back seam lands where it matters least.
  */
 import { DEG } from './frame.ts';
-import type { CameraPose, Vec3 } from './frame.ts';
+import type { Vec3 } from './frame.ts';
 import { buildScene, objectBounds } from './geometry.ts';
 import type { Scene } from './geometry.ts';
 import { objectCoverage, renderEquirect, rowWeights } from './render.ts';
@@ -141,8 +141,4 @@ export function frontYaw(layout: Layout, pos: Vec3): number {
   if (Math.hypot(sx, sz) < 1e-6) return 0;
   // Camera yaw: 0 looks north (-Z), 90 east (+X).
   return Math.round(((Math.atan2(sx, -sz) / DEG) + 360) % 360);
-}
-
-export function capturePose(c: CaptureResult): CameraPose {
-  return { position: c.best.position, yaw: c.best.yaw };
 }

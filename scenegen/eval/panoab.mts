@@ -2,22 +2,22 @@
  * Panorama A/B: which way of asking GPT-image-2 keeps the blockout's layout best.
  * Reuses the blockouts (conditions, caption, reference picture) of finished
  * projects, paints `n` panoramas per variant, and scores each with
- * scenegen/py/videoscene/panoalign.py (blockout edges vs panorama edges, above chance).
+ * scenegen/py/panoalign.py (blockout edges vs panorama edges, above chance).
  * Spends OpenAI image calls only - no JST-2 credits.
  *
  *   NODE_USE_ENV_PROXY=1 HTTPS_PROXY=... npx tsx scenegen/eval/panoab.mts <out> <projectId:label> ... [--n 3]
  */
-import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import { compileCaption } from '../core/caption.ts';
 import type { Layout } from '../core/types.ts';
+import { scorePanoramas } from '../server/alignScore.ts';
 import { openaiImageProvider } from '../server/pano.ts';
 import { geometryNote } from '../server/textScene.ts';
+import { loadEnv, ROOT } from './env.ts';
 
-const ROOT = new URL('../../', import.meta.url).pathname;
-const env = Object.fromEntries(readFileSync(join(ROOT, '.env.local'), 'utf8').split('\n').filter((l) => l.includes('=')).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
+const env = loadEnv();
 
 const VARIANTS = {
   base: { label: '现状：深度图 + 参考照片', photo: true, clay: false },
@@ -75,16 +75,14 @@ await Promise.all(Array.from({ length: 4 }, async () => {
 }));
 
 // Score.
-const py = join(ROOT, 'scenegen/py/.venv/bin/python');
 const results: Record<string, Record<string, Array<{ i: number; objects: number; shell: number }>>> = {};
 for (const c of cases) {
   const cdir = join(out, c.label);
   const files = jobs.filter((j) => j.label === c.label && existsSync(j.file));
-  const r = spawnSync(py, ['-m', 'videoscene.panoalign', join(cdir, 'semantic.png'), ...files.map((f) => f.file)], { cwd: join(ROOT, 'scenegen/py'), encoding: 'utf8', maxBuffer: 16 << 20 });
-  if (r.status !== 0) throw new Error(r.stderr);
-  const scores = JSON.parse(r.stdout) as Record<string, { objects: { lift: number }; shell: { lift: number } }>;
+  const scores = await scorePanoramas(join(cdir, 'semantic.png'), files.map((f) => f.file));
+  if (!scores) throw new Error('Scoring needs the Python environment (scenegen/py/.venv).');
   results[c.label] = {};
-  for (const f of files) (results[c.label]![f.variant] ??= []).push({ i: f.i, objects: scores[f.file]!.objects.lift, shell: scores[f.file]!.shell.lift });
+  files.forEach((f, k) => (results[c.label]![f.variant] ??= []).push({ i: f.i, objects: scores[k]!.objects, shell: scores[k]!.shell }));
 }
 writeFileSync(join(out, 'scores.json'), JSON.stringify({ variants: VARIANTS, results }, null, 2));
 for (const [label, vs] of Object.entries(results)) {

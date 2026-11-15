@@ -1,10 +1,10 @@
 # 场景生成（scenegen）
 
-和导演台解耦的 3D 场景生成模块，打开 `http://localhost:5193/scenegen/`（和导演台同一个 dev server）。生成的场景可以一键导入导演台素材库。
+和导演台解耦的 3D 场景生成模块。日常在**画布**上用：左侧 ＋ →「场景生成」（文本 / 图片 / 视频）或「场景重建」（视频），完成后「送到 World」。`http://localhost:5193/scenegen/` 是**批量测试页**：逐个项目看输入、白模、全景候选、3D 场景和指标。
 
 | 入口 | 流程 |
 |---|---|
-| **文本 / 图片 → 场景** | agent 读懂文字或图片，用白模资产摆出布局 → 自动选拍摄点 → 渲染等距深度图 → GPT-image-2 以深度图为参考画全景图 → JST-2 `custom-pano` 建场景 → 检测缺口，自动补视角（`generate` + `reconstruct`） |
+| **文本 / 图片 / 视频 → 场景** | agent 读懂输入（视频取 6 张关键帧），用白模资产摆出布局 → 自动选拍摄点 → 渲染等距深度图和白模图 → GPT-image-2 并行画 3 张全景，按与白模的对齐分和人物检查选 1 张（用户的图片不发给出图模型，只通过 agent 的风格文字传达，否则模型会照抄图片构图）→ JST-2 `custom-pano` 建场景 → 检测缺口，按场景大小自动补视角（`generate` + `reconstruct`） |
 | **视频 → 场景** | 抽帧（去模糊、按重叠度选关键帧）→ COLMAP 估计位姿 → 重力对齐、按相机高 1.5 m 定尺度 → 选出 ≤ 40 张图片 + 位姿 → JST-2 `posed-images`（**接口待开放，目前由内置 mock 代替**） |
 
 方案和调研见 `docs/SCENEGEN_DESIGN.md`、`docs/ATLAS_ANALYSIS.md`。
@@ -39,6 +39,7 @@ uv venv -p 3.12 .venv && uv pip install -p .venv -r requirements.txt   # pycolma
 ```bash
 npm test               # 导演台 + scenegen 的 TS 测试
 npm run test:video     # 视频管线 pytest（含在 livingRoom 漫游视频上的集成测试，约 30 s）
+npx tsx scenegen/eval/e2e.mts .data/scenegen/eval/<run> [组 id|功能]   # 真实端到端（dev server 运行时）
 npm run typecheck
 ```
 
@@ -48,9 +49,12 @@ npm run typecheck
 |---|---|
 | `core/` | Node 和页面都能跑：白模资产库（`catalog.ts`，36 类参数化形体）、按关系摆放和布局检查（`layout.ts`）、CPU 射线求交（`geometry.ts`）、等距柱状深度 / 语义 / 白模渲染（`render.ts`）、拍摄点搜索（`capture.ts`）、全景 prompt（`caption.ts`）、坐标约定（`frame.ts`）、SPZ 读写、与白模的深度一致性（`align.ts`） |
 | `agent/` | 布局 agent：系统提示词、14 个工具、对话循环（在页面里执行工具，服务端只转发模型） |
-| `server/` | Vite 中间件（`plugin.ts`）、JST-2 客户端（含 posed-images）、全景图 provider（GPT-image-2 / JST-2 / FLUX）、文本管线（`textScene.ts`）、自动补缺口（`fill.ts`，复用 `src/stage/scenecheck.ts` 的 PINOC 检测）、视频管线（`videoScene.ts`）、posed-images mock |
-| `web/` | 页面 |
-| `py/` | 视频 → 图片 + 位姿 |
+| `web/` | 批量测试页；`api.ts` 是项目 API 客户端（页面、画布节点、评测脚本共用），`agentHost.ts` 是 agent 工具和项目 API 之间的桥（三处共用），`runner.ts` 供画布节点调用 |
+| `server/` | Vite 中间件（`plugin.ts`）、JST-2 客户端（含 posed-images）、全景图 provider（GPT-image-2 / JST-2 / FLUX）、全景对齐打分（`alignScore.ts`）、文本管线（`textScene.ts`）、自动补缺口（`fill.ts`，复用 `src/stage/scenecheck.ts` 的 PINOC 检测）、视频管线（`videoScene.ts`、`keyframes.ts`）、posed-images mock |
+| `py/` | `videoscene/`：视频 → 图片 + 位姿（抽帧、COLMAP、规范化、选视角）；`panoalign.py`：全景图与白模的对齐打分 |
+| `eval/` | `e2e.mts`：真实端到端测试（花额度）；`panoab.mts`：出图方式对比（只花 GPT-image 调用） |
+| `../app/canvas/SceneNodes.tsx` | 画布上的「场景生成」「场景重建」节点：每个节点对应一个 scenegen 项目 |
+| `../app/server/openaiRelay.ts` | 导演台 agent 和场景 agent 共用的 OpenAI Responses 流式转发 |
 
 数据在 `.data/scenegen/projects/<id>/`。导出时调用导演台新加的 `POST /api/library/import-scene`，复制 `.spz`、全景图和 `layout.json`。
 
