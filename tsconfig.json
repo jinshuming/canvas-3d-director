@@ -18,5 +18,5 @@
       "@stage": ["./src/stage/index.ts"]
     }
   },
-  "include": ["src", "app", "vite.config.ts"]
+  "include": ["src", "app", "scenegen", "vite.config.ts"]
 }
