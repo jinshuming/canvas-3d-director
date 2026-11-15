@@ -1,0 +1,4 @@
+pycolmap>=4.0
+numpy
+opencv-python-headless
+pytest
