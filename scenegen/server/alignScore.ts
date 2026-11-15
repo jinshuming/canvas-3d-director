@@ -1,5 +1,5 @@
 /**
- * Score panoramas against their blockout with scenegen/py/videoscene/panoalign.py
+ * Score panoramas against their blockout with scenegen/py/panoalign.py
  * (blockout edges vs panorama edges, above chance; 0 = chance, 1 = perfect).
  * Null when the Python environment is not installed: callers then keep the
  * first candidate.
@@ -18,7 +18,7 @@ export function alignScorerAvailable(): boolean {
 export function scorePanoramas(semanticPng: string, panos: string[]): Promise<AlignScore[] | null> {
   if (!alignScorerAvailable()) return Promise.resolve(null);
   return new Promise((resolve) => {
-    const p = spawn(PY_BIN, ['-m', 'videoscene.panoalign', semanticPng, ...panos], { cwd: PY_DIR });
+    const p = spawn(PY_BIN, ['-m', 'panoalign', semanticPng, ...panos], { cwd: PY_DIR });
     let out = '';
     p.stdout.on('data', (c: Buffer) => { out += c.toString(); });
     p.on('error', () => resolve(null));

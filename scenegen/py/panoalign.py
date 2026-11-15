@@ -12,7 +12,7 @@ where recall = share of blockout edge pixels with a panorama edge within 1.5°, 
 edges are its strongest 8% gradients (the same density for every image). 0 = chance, 1 = perfect. Reported separately for object outlines and for
 the room's own lines (shell).
 
-    python -m videoscene.panoalign <semantic.png> <panorama.png> [...more panoramas] [--json]
+    python -m panoalign <semantic.png> <panorama.png> [...more panoramas] [--json]
 """
 import argparse
 import json

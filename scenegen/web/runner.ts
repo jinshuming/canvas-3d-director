@@ -5,8 +5,8 @@
  * a reload; the agent turn runs in the page that started it.
  */
 import { runAgentTurn } from '../agent/loop.ts';
-import type { AgentHost } from '../agent/tools.ts';
 import type { Layout } from '../core/types.ts';
+import { projectHost } from './agentHost.ts';
 import { api, toDataUrl } from './api.ts';
 import type { Job, Project } from './api.ts';
 
@@ -27,46 +27,29 @@ export async function generateScene(projectId: string, inputs: SceneInputs, onSt
     await api.reference(projectId, inputs.image);
     pics.push(await toDataUrl(inputs.image, 1280));
   }
-  const project = await api.get(projectId);
-  const layout: Layout = project.layout;
-  let job: Job | null = null;
-  const host: AgentHost = {
-    layout,
-    changed: () => {},
-    look: async () => {
-      await api.put(projectId, { layout });
-      const c = await api.conditions(projectId);
-      if (!layout.capture) layout.capture = c.capture;
-      return { image: await toDataUrl(c.files.shaded, 1024), prompt: c.prompt };
-    },
-    findCapture: async () => { await api.put(projectId, { layout }); return api.capture(projectId); },
-    generate: async () => {
-      if (job) return { jobId: job.id };
-      await api.put(projectId, { layout, title: layout.title });
-      job = await api.generate(projectId, {});
-      return { jobId: job.id };
-    },
-  };
+  const layout: Layout = (await api.get(projectId)).layout;
+  const host = projectHost(projectId, layout, { toDataUrl });
   let tools = 0;
   onStatus({ phase: 'agent', message: 'Agent 正在理解输入、摆放白模', progress: 0.05 });
   await runAgentTurn(inputs.text.trim(), host, {
-    respond: (body, signal) => fetch('/scenegen/api/agent/respond', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal }),
+    respond: api.respondAgent,
     emit: (it) => {
       if (it.role !== 'tool') return;
       tools++;
-      const what: Record<string, string> = { set_room: '建房间', set_outdoor: '设室外场地', add_opening: '开门窗', place_objects: '摆放物体', update_object: '调整物体', check_layout: '检查布局', set_style: '设定风格', look: '查看白模', choose_capture_point: '选拍摄点', generate_scene: '开始生成' };
-      onStatus({ phase: 'agent', message: `Agent：${what[it.name] ?? it.name}（${layout.objects.length} 个物体）`, progress: Math.min(0.12, 0.05 + tools * 0.005) });
+      onStatus({ phase: 'agent', message: `Agent：${TOOL_LABEL[it.name] ?? it.name}（${layout.objects.length} 个物体）`, progress: Math.min(0.12, 0.05 + tools * 0.005) });
     },
     images: pics,
   });
   // The agent is asked to start generation; if it stopped short, start it so the node finishes.
-  if (!job) {
+  if (!host.job()) {
     if (!layout.objects.length) throw new Error('Agent 没有摆出任何物体，换个说法再试一次。');
     await host.generate();
   }
   await api.put(projectId, { layout, title: layout.title });
-  return job!;
+  return host.job()!;
 }
+
+const TOOL_LABEL: Record<string, string> = { set_room: '建房间', set_outdoor: '设室外场地', add_opening: '开门窗', place_objects: '摆放物体', update_object: '调整物体', check_layout: '检查布局', set_style: '设定风格', look: '查看白模', choose_capture_point: '选拍摄点', generate_scene: '开始生成' };
 
 /** Video → poses (COLMAP) → posed-images → scene. */
 export async function reconstructScene(projectId: string, video: Blob, onStatus: (s: RunStatus) => void): Promise<Job> {

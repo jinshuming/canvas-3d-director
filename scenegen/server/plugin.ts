@@ -33,6 +33,8 @@ import { compileCaption } from '../core/caption.ts';
 import { checkLayout } from '../core/layout.ts';
 import type { Layout } from '../core/types.ts';
 import { emptyLayout } from '../core/types.ts';
+import { relayResponses } from '../../app/server/openaiRelay.ts';
+import type { TurnBody } from '../../app/server/openaiRelay.ts';
 import { SCENEGEN_INSTRUCTIONS } from '../agent/prompt.ts';
 import { Jst2Client } from './jst2.ts';
 import { createMockJst2, MOCK_PREFIX } from './mockjst2.ts';
@@ -189,7 +191,10 @@ export function scenegenServer(opts: ScenegenOptions): Plugin {
         viggle: Boolean(opts.viggleKey),
       });
     }
-    if (p === '/agent/respond' && m === 'POST') return relayAgent(req, res);
+    if (p === '/agent/respond' && m === 'POST') {
+      const ai = opts.openai;
+      return relayResponses(req, res, ai && { apiKey: ai.apiKey, base: ai.base, model: ai.model, instructions: SCENEGEN_INSTRUCTIONS }, await readJson(req) as unknown as TurnBody);
+    }
     if (p === '/projects' && m === 'GET') {
       await mkdir(projectsDir, { recursive: true });
       const ids = (await readdir(projectsDir, { withFileTypes: true })).filter((d) => d.isDirectory()).map((d) => d.name);
@@ -339,33 +344,6 @@ export function scenegenServer(opts: ScenegenOptions): Plugin {
     return a + (b - a) * Math.max(0, Math.min(1, p));
   }
 
-  async function relayAgent(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
-    const ai = opts.openai;
-    if (!ai?.apiKey) throw new HttpError(503, 'OPENAI_API_KEY is not set on the server.');
-    const body = await readJson(req) as { input: unknown; previous_response_id?: string; tools: unknown[]; tool_choice?: string };
-    const upstream = await fetch(`${ai.base ?? 'https://api.openai.com/v1'}/responses`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${ai.apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: ai.model, instructions: SCENEGEN_INSTRUCTIONS, input: body.input, tools: body.tools,
-        ...(body.tool_choice ? { tool_choice: body.tool_choice } : {}),
-        ...(body.previous_response_id ? { previous_response_id: body.previous_response_id } : {}),
-        store: true, stream: true,
-      }),
-    });
-    if (!upstream.ok || !upstream.body) {
-      const text = await upstream.text();
-      let msg = `OpenAI ${upstream.status}`;
-      try { msg = (JSON.parse(text) as { error?: { message?: string } }).error?.message ?? msg; } catch { /* not JSON */ }
-      throw new HttpError(upstream.status === 401 ? 502 : upstream.status, msg);
-    }
-    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
-    const reader = upstream.body.getReader();
-    req.on('close', () => { void reader.cancel().catch(() => {}); });
-    for (;;) { const { done, value } = await reader.read(); if (done) break; res.write(value); }
-    res.end();
-    return true;
-  }
 
   return {
     name: 'scenegen-server',

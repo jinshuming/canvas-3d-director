@@ -3,10 +3,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type { ChatItem } from '../agent/loop.ts';
 import { runAgentTurn } from '../agent/loop.ts';
-import type { AgentHost } from '../agent/tools.ts';
 import { livingRoom, townSquare } from '../core/fixtures.ts';
 import { checkLayout } from '../core/layout.ts';
 import type { Layout } from '../core/types.ts';
+import { projectHost } from './agentHost.ts';
 import { api, file, toDataUrl } from './api.ts';
 import type { Conditions, Config, Job, Project } from './api.ts';
 import { SplatViewer } from './SplatViewer.tsx';
@@ -93,28 +93,16 @@ export function TextProject({ project, config, onChanged }: { project: Project; 
     let state: ChatState = chat;
     const emit = (it: ChatItem) => { state = { ...state, items: [...state.items, it] }; setChat(state); };
     const work = structuredClone(layoutRef.current);
-    const host: AgentHost = {
-      layout: work,
-      changed: () => { setLayout(structuredClone(work)); },
-      look: async () => {
-        await api.put(project.id, { layout: work });
-        const c = await api.conditions(project.id);
-        setCond(c);
-        if (!work.capture) work.capture = c.capture;
-        return { image: await toDataUrl(c.files.shaded, 1024), prompt: c.prompt };
-      },
-      findCapture: async () => { await api.put(project.id, { layout: work }); return api.capture(project.id); },
-      generate: async (p) => {
-        if (p) setProvider(p);
-        await api.put(project.id, { layout: work, title: work.title });
-        const j = await api.generate(project.id, { provider: p ?? provider, maxFills: fills });
-        setJob(j);
-        return { jobId: j.id };
-      },
-    };
+    const host = projectHost(project.id, work, {
+      toDataUrl,
+      onChanged: () => setLayout(structuredClone(work)),
+      onConditions: setCond,
+      generateBody: (p) => { if (p) setProvider(p); return { provider: p ?? provider, maxFills: fills }; },
+      onJob: setJob,
+    });
     try {
       const out = await runAgentTurn(text, host, {
-        respond: (body, signal) => fetch('/scenegen/api/agent/respond', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal }),
+        respond: api.respondAgent,
         previousId: chat.previousId, emit, images: pics,
       });
       state = { ...state, previousId: out.previousId };
