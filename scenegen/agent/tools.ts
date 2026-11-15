@@ -19,6 +19,9 @@ export interface AgentHost {
   generate(provider?: string): Promise<{ jobId: string }>;
 }
 
+/** People, characters, robots, animals: never blockout objects (they would be painted into the panorama). */
+const FIGURE = /\b(person|people|man|woman|child|kid|human|humanoid|figure|character|robot|android|cyborg|mannequin|statue of|dog|cat|horse|bird|animal)s?\b|人物|行人|机器人|人偶|模特|动物|小孩/i;
+
 export interface ToolOutput { text: string; image?: string; isError?: boolean }
 
 const WALLS = ['north', 'south', 'east', 'west'];
@@ -93,6 +96,7 @@ export async function runTool(name: string, args: Record<string, unknown>, host:
         const lines: string[] = [];
         let failed = 0;
         for (const spec of items) {
+          if (FIGURE.test(`${spec.type} ${spec.label ?? ''} ${spec.id ?? ''}`)) { failed++; lines.push(`${spec.id ?? spec.type}: REFUSED - the scene is an empty place: no people, characters, robots or animals (they are added later, in the director). Leave that spot empty.`); continue; }
           try {
             const o = placeObject(L, spec);
             lines.push(`${o.id}: ${o.type} at (${o.position.map((v) => v.toFixed(2)).join(', ')}), faces ${o.yaw}°`);

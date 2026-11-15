@@ -42,7 +42,7 @@ export interface TextSceneResult {
   /** The automatic gap fill (null when switched off). */
   fill: FillResult | null;
   /** The people check on the final panorama (null when no vision model), and how many paintings it took. */
-  panoCheck: { people: boolean; note: string } | null;
+  panoCheck: { people: boolean; prominent: boolean; note: string } | null;
   panoAttempts: number;
   files: { depth: string; semantic: string; shaded: string; panorama: string; scene: string; layout: string };
   legend: Array<{ cls: string; color: [number, number, number]; share: number }>;
@@ -108,18 +108,20 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
   lap('conditions');
 
   p('pano', `Painting the panorama (${deps.provider.label})`);
-  const paint = () => deps.provider.generate({ prompt, depth: c.depth, semantic: c.semantic, shaded: c.shaded, geometry: geometryNote(layout, c.capture), styleImage: deps.styleImage, signal: deps.signal, onProgress: (m) => p('pano', m) });
-  let pano = await paint();
+  const paint = (withStyle: boolean) => deps.provider.generate({ prompt, depth: c.depth, semantic: c.semantic, shaded: c.shaded, geometry: geometryNote(layout, c.capture), styleImage: withStyle ? deps.styleImage : undefined, signal: deps.signal, onProgress: (m) => p('pano', m) });
+  let pano = await paint(true);
   credits += pano.credits ?? 0;
-  // A person in the panorama becomes a smear in the scene and a figure no one can move: check, and paint once more.
-  let panoCheck: { people: boolean; note: string } | null = null;
+  // A figure in the panorama becomes a smear in the scene that no one can move: check, and paint again
+  // (at most twice more) WITHOUT the reference picture, which is where figures come from - the caption
+  // still carries its style. Small decor (figurines, pictures) is let through.
+  let panoCheck: { people: boolean; prominent: boolean; note: string } | null = null;
   let panoAttempts = 1;
   if (deps.vision) {
     panoCheck = await deps.vision(pano.bytes).catch(() => null);
-    if (panoCheck?.people) {
-      p('pano', `The panorama has people in it (${panoCheck.note}): painting it again`);
-      pano = await paint();
-      panoAttempts = 2;
+    while (panoCheck?.prominent && panoAttempts < 3) {
+      p('pano', `The panorama has a figure in it (${panoCheck.note}): painting it again without the reference picture`);
+      pano = await paint(false);
+      panoAttempts++;
       credits += pano.credits ?? 0;
       panoCheck = await deps.vision(pano.bytes).catch(() => null);
     }
