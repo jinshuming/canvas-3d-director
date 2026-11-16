@@ -29,7 +29,7 @@ export interface CanvasState {
 }
 
 export const NODE_LABEL: Record<NodeKind, string> = {
-  image: 'Image', video: 'Video', '3d': '3D', text: 'Text', previs: 'Agentic Previs', world: 'World', scenegen: '场景生成', scenerecon: '场景重建',
+  image: 'Image', video: 'Video', '3d': '3D', text: 'Text', previs: 'Agentic Previs', world: '导演台', scenegen: '场景生成', scenerecon: '场景重建',
 };
 
 export const NODE_SIZE: Record<NodeKind, [number, number]> = {
@@ -74,6 +74,29 @@ export function bindWorldNode(nodeId: string, worldId: string, title: string): b
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * A scene node's result went to a new 导演台 from the full-screen scene editor: put the 导演台 node
+ * to the scene node's right, wired from it - what the canvas does itself when the node's own
+ * button sends it.
+ */
+export function appendWorldAfter(fromId: string, worldId: string, title: string): string | null {
+  try {
+    const raw = localStorage.getItem(KEY);
+    if (!raw) return null;
+    const s = loadCanvas(() => JSON.parse(raw) as CanvasState);
+    const from = s.nodes.find((n) => n.id === fromId);
+    if (!from) return null;
+    const [w, h] = NODE_SIZE.world;
+    const id = newId();
+    s.nodes.push({ id, kind: 'world', x: from.x + from.w + 120, y: from.y + (from.h - h) / 2, w, h, worldId, title });
+    s.edges.push({ from: fromId, to: id });
+    saveCanvas(s);
+    return id;
+  } catch {
+    return null;
   }
 }
 

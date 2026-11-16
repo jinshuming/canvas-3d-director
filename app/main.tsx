@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 
 import { api } from './api.ts';
 import { CanvasPage } from './canvas/CanvasPage.tsx';
+import { SceneEditor } from './canvas/SceneEditor.tsx';
 import { Icon } from './icons.tsx';
 import { linkProps, navigate, useRoute, worldPath } from './router.ts';
 import { Studio } from './Studio.tsx';
@@ -17,10 +18,10 @@ function Worlds() {
   };
   return (
     <div className="home wide">
-      <div className="home-brand"><h1>World</h1></div>
-      <p className="lead">每个 World 是一个工程文件：场景、角色、动作、镜头，以及和 Agent 的对话。</p>
+      <div className="home-brand"><h1>导演台</h1><span className="muted">Cinema Studio</span></div>
+      <p className="lead">每个导演台是一个工程文件：场景、角色、动作、镜头，以及和 Agent 的对话。</p>
       <div className="btn-row">
-        <button className="pill primary" disabled={creating} onClick={() => void create()}><Icon name="plus" />新建 World</button>
+        <button className="pill primary" disabled={creating} onClick={() => void create()}><Icon name="plus" />新建导演台</button>
         <a className="pill" {...linkProps('/canvas')}><Icon name="chevronLeft" />回到画布</a>
       </div>
       <WorldBrowser />
@@ -33,6 +34,7 @@ function App() {
   const [config, setConfig] = useState<{ live: boolean; agent: { model: string } | null }>({ live: false, agent: null });
   useEffect(() => { api.config().then(setConfig).catch(() => {}); }, []);
   if (route.page === 'canvas') return <CanvasPage />;
+  if (route.page === 'scene') return <SceneEditor key={route.id} projectId={route.id} nodeId={route.node} />;
   if (route.page === 'world') return <Studio key={route.id} stageId={route.id} nodeId={route.node} live={config.live} agentModel={config.agent?.model ?? null} />;
   return <Worlds />;
 }
