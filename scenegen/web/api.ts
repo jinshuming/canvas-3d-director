@@ -50,7 +50,7 @@ export const api = {
   layoutVideo: (id: string, file: RawBody) => call<{ frames: Array<{ file: string; time: number; url: string }> }>('PUT', `/projects/${id}/layout-video`, undefined, { body: file, type: typeOf(file, 'video/mp4') }),
   reference: (id: string, file: RawBody, type?: string) => call<{ url: string }>('PUT', `/projects/${id}/reference`, undefined, { body: file, type: type ?? typeOf(file, 'image/jpeg') }),
   video: (id: string, file: RawBody) => call<{ file: string; bytes: number }>('PUT', `/projects/${id}/video`, undefined, { body: file, type: typeOf(file, 'video/mp4') }),
-  videoRun: (id: string, body: { square?: number }) => call<Job>('POST', `/projects/${id}/video-run`, body),
+  videoRun: (id: string, body: { square?: number; mode?: 'generate' | 'posed'; reusePoses?: boolean; maxViews?: number }) => call<Job>('POST', `/projects/${id}/video-run`, body),
   cancel: (id: string) => call<{ ok: true }>('POST', `/projects/${id}/cancel`),
   exportScene: (id: string) => call<{ sceneId: string }>('POST', `/projects/${id}/export`),
   /** One streamed model turn for the layout agent (the loop's `respond`). */

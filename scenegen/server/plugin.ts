@@ -39,6 +39,7 @@ import { SCENEGEN_INSTRUCTIONS } from '../agent/prompt.ts';
 import { Jst2Client } from './jst2.ts';
 import { createMockJst2, MOCK_PREFIX } from './mockjst2.ts';
 import { deadline, sam3d } from './objects.ts';
+import { videoToSceneByGenerate } from './videoGen.ts';
 import { falFluxDepthProvider, jst2ReferenceProvider, openaiImageProvider, paintObject, peopleCheck } from './pano.ts';
 import { buildLayout, requestSpec } from './quickLayout.ts';
 import type { PanoProvider } from './pano.ts';
@@ -335,6 +336,20 @@ export function scenegenServer(opts: ScenegenOptions): Plugin {
       if (!videoPipelineAvailable()) throw new HttpError(503, 'The video pipeline is not installed (scenegen/py/.venv).');
       const body = await readJson(req);
       const video = join(pdir(proj.id), proj.video.file);
+      // Until JST-2 takes images with poses, the default is the generate route (an anchor panorama
+      // from the real frames, JST-2 views at the video's own cameras); 'posed' keeps the mock.
+      const mode = body.mode === 'posed' || body.mode === 'generate' ? body.mode : endpoint === 'mock' && opts.openai?.apiKey ? 'generate' : 'posed';
+      if (mode === 'generate') {
+        const out = join(pdir(proj.id), 'out');
+        const job = startJob(proj, 'video', (j, signal) => videoToSceneByGenerate(video, out, {
+          jst2, openai: { apiKey: opts.openai?.apiKey, base: opts.openai?.base, model: opts.imageModel },
+          reusePoses: body.reusePoses === true, square: body.square ? Number(body.square) : undefined, signal,
+          maxViews: body.maxViews ? Number(body.maxViews) : undefined,
+          onPoseProgress: (stage, progress, message) => note(j, stage, message, stageProgress(stage, progress) * 0.55),
+          onProgress: (stage, message) => note(j, stage, message, GEN_PROGRESS[stage] ?? 0.6),
+        }));
+        return json(res, job, 202);
+      }
       const job = startJob(proj, 'video', (j, signal) => videoToScene(video, join(pdir(proj.id), 'out'), {
         jst2, endpoint, registerMockPoints: mock.registerPoints, posedBase: opts.posedImagesBase ?? `${base()}${MOCK_PREFIX}`,
         square: body.square ? Number(body.square) : undefined, signal,
@@ -369,6 +384,7 @@ export function scenegenServer(opts: ScenegenOptions): Plugin {
     return false;
   }
 
+  const GEN_PROGRESS: Record<string, number> = { stitch: 0.56, complete: 0.6, scale: 0.66, retry: 0.7, scene: 0.74, path: 0.82, rebuild: 0.9, fill: 0.95, done: 1 };
   function stageProgress(stage: string, p: number): number {
     const span: Record<string, [number, number]> = { probe: [0, 0.02], sample: [0.02, 0.1], colmap: [0.1, 0.75], normalise: [0.75, 0.8], select: [0.8, 0.82], write: [0.82, 0.85], upload: [0.85, 0.9], scene: [0.9, 0.99], done: [1, 1] };
     const [a, b] = span[stage] ?? [0, 1];

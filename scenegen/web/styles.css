@@ -105,3 +105,9 @@ main { flex: 1; min-width: 0; overflow: hidden; }
 .splat-viewer .layers label.failed { color: #ff8a80; }
 .splat-viewer .layers label.loading { opacity: .6; }
 .splat-viewer .layers button, .splat-viewer .overlay button { font-size: 11px; margin-top: 4px; }
+.gen-anchor .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.gen-anchor img { width: 100%; border-radius: 4px; display: block; }
+.gen-views { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; }
+.gen-views figure { margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 3px; font-size: 11px; }
+.gen-views figure img { aspect-ratio: 16 / 9; object-fit: cover; }
+.gen-views figcaption { grid-column: 1 / -1; color: #888; }
