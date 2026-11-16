@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { horizontalScale } from './align.ts';
+import { bottomOf, dropTo, straighten, supportTilt } from './seat.ts';
+import type { Gaussians } from './gaussians.ts';
+import { transformGaussians } from './gaussians.ts';
 import { compileCaption } from './caption.ts';
 import { findCapturePoint, frontYaw } from './capture.ts';
 import { townSquare, livingRoom } from './fixtures.ts';
@@ -191,4 +194,30 @@ test('horizontalScale: a room rebuilt at 85% of the blockout reads as 0.85', () 
   const r = renderEquirect(buildScene(l), pose, 256, 128);
   const s = horizontalScale(points, r, { position: [0, 0, 0], yaw: pose.yaw });
   assert.ok(s !== null && Math.abs(s - 0.85) < 0.02, `scale ${s}`);
+});
+
+/** A solid box of splats (surface points), w × h × d, its base centre at the origin. */
+function boxSplats(w: number, h: number, d: number): Gaussians {
+  const pts: number[] = [];
+  const step = 0.03;
+  for (let x = -w / 2; x <= w / 2; x += step) for (let z = -d / 2; z <= d / 2; z += step) { pts.push(x, 0, z); pts.push(x, h, z); }
+  for (let y = 0; y <= h; y += step) for (let t = -0.5; t <= 0.5; t += step / Math.max(w, d)) { pts.push(t * w, y, -d / 2, t * w, y, d / 2, -w / 2, y, t * d, w / 2, y, t * d); }
+  const n = pts.length / 3;
+  return { count: n, positions: new Float32Array(pts), scales: new Float32Array(n * 3).fill(Math.log(0.01)), rotations: new Float32Array(n * 4).map((_, i) => (i % 4 === 3 ? 1 : 0)), alphas: new Float32Array(n).fill(1), colors: new Float32Array(n * 3) };
+}
+
+test('seat: a box SAM 3D tilted 8° is levelled about its base, then dropped onto its support', () => {
+  const g = boxSplats(1.2, 0.8, 0.6);
+  const a = (8 * Math.PI) / 180;
+  transformGaussians(g, [[Math.cos(a), -Math.sin(a), 0], [Math.sin(a), Math.cos(a), 0], [0, 0, 1]], 1, [0.5, -1.2, 0.3]); // tilt about z, move
+  const before = supportTilt(g)!;
+  assert.ok(Math.abs(before.tiltDeg - 8) < 1.5, `tilt read ${before.tiltDeg}`);
+  const s = straighten(g);
+  assert.ok(s.straightened);
+  assert.ok(supportTilt(g)!.tiltDeg < 1, `after ${supportTilt(g)!.tiltDeg}`);
+  dropTo(g, -1.5);
+  assert.ok(Math.abs(bottomOf(g)! + 1.5) < 0.02, `bottom ${bottomOf(g)}`);
+  // A level box is left as it is.
+  const level = boxSplats(1, 1, 1);
+  assert.equal(straighten(level).straightened, false);
 });
