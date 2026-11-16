@@ -169,6 +169,16 @@ export function writeSpzGaussians(g: Gaussians, fractionalBits = 12): Uint8Array
 
 export type Mat3 = [[number, number, number], [number, number, number], [number, number, number]];
 
+export const IDENTITY: Mat3 = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+
+export const mul = (a: Mat3, b: Mat3): Mat3 => [0, 1, 2].map((r) => [0, 1, 2].map((c) => a[r]![0]! * b[0]![c]! + a[r]![1]! * b[1]![c]! + a[r]![2]! * b[2]![c]!)) as Mat3;
+
+/** Turn about +Y by `deg` (x towards -z for positive angles, like the blockout's yaw turning the front from +Z to +X). */
+export function rotY(deg: number): Mat3 {
+  const r = (deg * Math.PI) / 180, c = Math.cos(r), s = Math.sin(r);
+  return [[c, 0, s], [0, 1, 0], [-s, 0, c]];
+}
+
 function quatOf(m: Mat3): [number, number, number, number] {
   const [[a, b, c], [d, e, f], [g, h, i]] = m;
   const tr = a + e + i;
@@ -200,6 +210,8 @@ export function transformGaussians(g: Gaussians, R: Mat3, s: number, t: [number,
   return g;
 }
 
+export const translateGaussians = (g: Gaussians, t: [number, number, number]): Gaussians => transformGaussians(g, IDENTITY, 1, t);
+
 /**
  * Keep the `max` most opaque Gaussians; the faintest go first. NOT by size: a SAM 3D object's
  * surfaces are its many small opaque Gaussians, and keeping the largest (tried: 570k → 150k) left a
@@ -207,9 +219,7 @@ export function transformGaussians(g: Gaussians, R: Mat3, s: number, t: [number,
  */
 export function thinGaussians(g: Gaussians, max: number): Gaussians {
   if (g.count <= max) return g;
-  const score = new Float32Array(g.count);
-  for (let i = 0; i < g.count; i++) score[i] = g.alphas[i]!;
-  const idx = Array.from({ length: g.count }, (_, i) => i).sort((a, b) => score[b]! - score[a]!).slice(0, max);
+  const idx = Array.from({ length: g.count }, (_, i) => i).sort((a, b) => g.alphas[b]! - g.alphas[a]!).slice(0, max);
   return pick(g, idx);
 }
 
@@ -236,18 +246,32 @@ export function concatGaussians(parts: Gaussians[]): Gaussians {
   return o;
 }
 
+/** The value at share `q` (0-1) of an ascending-sorted, non-empty array. */
+export function quantile(sorted: ArrayLike<number>, q: number): number {
+  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.floor(sorted.length * q)))]!;
+}
+
 /** Per-axis percentile bounds of the opaque Gaussians (outliers trimmed). */
 export function bounds(g: Gaussians, q = 0.02, minAlpha = 0.3): { min: [number, number, number]; max: [number, number, number] } {
   const min: [number, number, number] = [0, 0, 0], max: [number, number, number] = [0, 0, 0];
+  const step = Math.max(1, Math.floor(g.count / 100000));
   for (let a = 0; a < 3; a++) {
     const v: number[] = [];
-    const step = Math.max(1, Math.floor(g.count / 100000));
     for (let i = 0; i < g.count; i += step) if (g.alphas[i]! >= minAlpha) v.push(g.positions[i * 3 + a]!);
+    if (!v.length) continue;
     v.sort((x, y) => x - y);
-    min[a] = v[Math.floor(v.length * q)] ?? 0;
-    max[a] = v[Math.floor(v.length * (1 - q))] ?? 0;
+    min[a] = quantile(v, q);
+    max[a] = quantile(v, 1 - q);
   }
   return { min, max };
+}
+
+/** About `max` positions of the opaque Gaussians (every k-th Gaussian), minus `origin`, as flat xyz. */
+export function opaqueSample(g: Gaussians, max: number, origin: [number, number, number] = [0, 0, 0]): Float32Array {
+  const out: number[] = [];
+  const step = Math.max(1, Math.floor(g.count / max));
+  for (let i = 0; i < g.count; i += step) if (g.alphas[i]! >= 0.3) out.push(g.positions[i * 3]! - origin[0], g.positions[i * 3 + 1]! - origin[1], g.positions[i * 3 + 2]! - origin[2]);
+  return new Float32Array(out);
 }
 
 /**
@@ -257,6 +281,6 @@ export function bounds(g: Gaussians, q = 0.02, minAlpha = 0.3): { min: [number, 
 export function scaleSpz(bytes: Uint8Array, k: number): Uint8Array {
   if (k === 1) return bytes;
   const g = readSpzGaussians(bytes);
-  transformGaussians(g, [[1, 0, 0], [0, 1, 0], [0, 0, 1]], k, [0, 0, 0]);
+  transformGaussians(g, IDENTITY, k, [0, 0, 0]);
   return writeSpzGaussians(g);
 }

@@ -53,6 +53,7 @@ main { flex: 1; min-width: 0; overflow: hidden; }
 .tabs button.on { background: var(--text); color: #fff; border-color: var(--text); }
 .pano { flex: 0 1 auto; border-radius: 8px; overflow: hidden; border: 1px solid var(--line); background: #fff; aspect-ratio: 2 / 1; max-height: 42%; display: grid; place-items: center; }
 .pano img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.pano.tall { aspect-ratio: auto; max-height: none; flex: 1 1 55%; min-height: 320px; }
 .side { border-left: 1px solid var(--line); background: var(--panel); padding: 10px 12px; overflow: auto; }
 .side h3, .video-left h3, .video-right h3 { font-size: 12px; margin: 14px 0 6px; color: var(--muted); font-weight: 600; }
 .side h3:first-child { margin-top: 0; }
@@ -74,6 +75,15 @@ main { flex: 1; min-width: 0; overflow: hidden; }
 .result td { padding: 3px 0; vertical-align: top; }
 .result td:first-child { color: var(--muted); width: 42%; }
 .result .row { margin: 8px 0 2px; }
+.result .assets { display: grid; grid-template-columns: repeat(auto-fill, minmax(88px, 1fr)); gap: 6px; margin: 6px 0; }
+.result .assets figure { margin: 0; font-size: 11px; }
+.result .assets img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 4px; }
+.result .assets figure.err img { opacity: .4; }
+.cands { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin-top: 6px; }
+.cands figure { margin: 0; border: 2px solid transparent; border-radius: 4px; }
+.cands figure.on { border-color: var(--accent); }
+.cands img { width: 100%; display: block; border-radius: 3px; }
+.cands figcaption { font-size: 10px; color: var(--muted); text-align: center; }
 .video-project { display: grid; grid-template-columns: 320px 1fr; height: 100%; }
 .video-left { border-right: 1px solid var(--line); background: var(--panel); padding: 12px; overflow: auto; }
 .video-left .preview { width: 100%; border-radius: 6px; margin-top: 8px; }
@@ -85,29 +95,21 @@ main { flex: 1; min-width: 0; overflow: hidden; }
 .frames figure { margin: 0; }
 .frames img { width: 100%; border-radius: 4px; display: block; }
 .frames figcaption { font-size: 10px; color: var(--muted); }
-.pano.tall { aspect-ratio: auto; max-height: none; flex: 1 1 55%; min-height: 320px; }
-.splat-viewer { position: relative; width: 100%; height: 100%; min-height: 320px; background: #101214; }
-.splat-viewer canvas { width: 100%; height: 100%; display: block; }
-.splat-viewer .overlay { position: absolute; inset: 0; display: grid; place-items: center; color: #cfd3d8; }
-.splat-viewer .hint { position: absolute; left: 8px; bottom: 6px; font-size: 11px; color: #cfd3d8; background: rgba(0,0,0,.45); padding: 2px 6px; border-radius: 4px; }
 .video-scene { height: 380px; margin-bottom: 10px; border-radius: 8px; overflow: hidden; }
-.cands { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin-top: 6px; }
-.cands figure { margin: 0; border: 2px solid transparent; border-radius: 4px; }
-.cands figure.on { border-color: var(--accent); }
-.cands img { width: 100%; display: block; border-radius: 3px; }
-.cands figcaption { font-size: 10px; color: var(--muted); text-align: center; }
-.splat-viewer .layers { position: absolute; right: 8px; top: 8px; display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: #e3e6ea; background: rgba(0,0,0,.5); padding: 6px 8px; border-radius: 6px; max-height: 70%; overflow: auto; }
-.splat-viewer .layers label { display: flex; gap: 4px; align-items: center; cursor: pointer; }
-.result .assets { display: grid; grid-template-columns: repeat(auto-fill, minmax(88px, 1fr)); gap: 6px; margin: 6px 0; }
-.result .assets figure { margin: 0; font-size: 11px; }
-.result .assets img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 4px; }
-.result .assets figure.err img { opacity: .4; }
-.splat-viewer .layers label.failed { color: #ff8a80; }
-.splat-viewer .layers label.loading { opacity: .6; }
-.splat-viewer .layers button, .splat-viewer .overlay button { font-size: 11px; margin-top: 4px; }
 .gen-anchor .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .gen-anchor img { width: 100%; border-radius: 4px; display: block; }
 .gen-views { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; }
 .gen-views figure { margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 3px; font-size: 11px; }
 .gen-views figure img { aspect-ratio: 16 / 9; object-fit: cover; }
 .gen-views figcaption { grid-column: 1 / -1; color: #888; }
+
+/* The 3D viewer (SplatViewer.tsx) */
+.splat-viewer { position: relative; width: 100%; height: 100%; min-height: 320px; background: #101214; }
+.splat-viewer canvas { width: 100%; height: 100%; display: block; }
+.splat-viewer .overlay { position: absolute; inset: 0; display: grid; place-items: center; color: #cfd3d8; }
+.splat-viewer .hint { position: absolute; left: 8px; bottom: 6px; font-size: 11px; color: #cfd3d8; background: rgba(0,0,0,.45); padding: 2px 6px; border-radius: 4px; }
+.splat-viewer .layers { position: absolute; right: 8px; top: 8px; display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: #e3e6ea; background: rgba(0,0,0,.5); padding: 6px 8px; border-radius: 6px; max-height: 70%; overflow: auto; }
+.splat-viewer .layers label { display: flex; gap: 4px; align-items: center; cursor: pointer; }
+.splat-viewer .layers label.failed { color: #ff8a80; }
+.splat-viewer .layers label.loading { opacity: .6; }
+.splat-viewer .layers button, .splat-viewer .overlay button { font-size: 11px; margin-top: 4px; }

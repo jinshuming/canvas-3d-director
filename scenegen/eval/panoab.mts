@@ -5,7 +5,9 @@
  * scenegen/py/panoalign.py (blockout edges vs panorama edges, above chance).
  * Spends OpenAI image calls only - no JST-2 credits.
  *
- *   NODE_USE_ENV_PROXY=1 HTTPS_PROXY=... npx tsx scenegen/eval/panoab.mts <out> <projectId:label> ... [--n 3]
+ *   npx tsx scenegen/eval/panoab.mts <out> <projectId:label> ... [--n 3]
+ *
+ * Reads OPENAI_API_KEY from .env.local. If OpenAI needs a proxy, set NODE_USE_ENV_PROXY=1 and HTTPS_PROXY.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';

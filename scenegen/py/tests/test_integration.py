@@ -8,7 +8,8 @@ import pytest
 
 from test_unit import check_views_schema
 
-VIDEO_DIR = "/Users/chenmo/Desktop/Dev/P.I.N.O.C./handoff/explore-videos"
+# A walk-through video of a living room; set SCENEGEN_TEST_VIDEOS to the folder that has it.
+VIDEO_DIR = os.environ.get("SCENEGEN_TEST_VIDEOS", "")
 VIDEO = os.path.join(VIDEO_DIR, "livingRoom-explore.mp4")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 

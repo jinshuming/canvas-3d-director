@@ -8,10 +8,12 @@ cp .env.example .env.local   # 填上 key，见下文
 npm run dev                  # http://localhost:5193/canvas
 ```
 
-- `.env.local`（已 gitignore）放两个 key，都只在 dev server 的中间件里使用，不会进页面：
-  - `VIGGLE_API_KEY`：用来生成场景、角色、动作。没有这个 key 时只能用预置素材。
-  - `OPENAI_API_KEY`：World Agent 使用，模型默认 `gpt-6-luna`。
-- 如果本机访问 OpenAI 需要代理，Node 进程要带上 `NODE_USE_ENV_PROXY=1` 和 `HTTPS_PROXY=http://127.0.0.1:7897`。
+- `.env.local`（已 gitignore）放 key，只在 dev server 的中间件里使用，不会进页面（完整列表见 `.env.example`）：
+  - `VIGGLE_API_KEY`：生成场景、角色、动作，也用于场景生成的 JST-2。没有这个 key 时只能用预置素材。
+  - `OPENAI_API_KEY`：导演台 Agent，以及场景生成的白模布局和全景图。模型默认 `gpt-6-luna`。
+  - `FAL_KEY`：场景生成里的 SAM 3D 物体。没有这个 key 时，场景不带单独的物体。
+- 如果访问 OpenAI 需要代理，Node 进程要带上 `NODE_USE_ENV_PROXY=1` 和 `HTTPS_PROXY=<你的代理地址>`。
+- 场景生成（画布上的「场景生成」「场景重建」节点）的说明见 [scenegen/README.md](scenegen/README.md)。
 - 首次启动时，会把 `assets/seed/` 里的「Modern living room」导入素材库。
 
 ## 路由

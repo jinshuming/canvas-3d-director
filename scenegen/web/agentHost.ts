@@ -1,9 +1,9 @@
 /**
  * The layout agent's host for a scenegen project: its tools edit `layout` in
  * memory and reach the server (renders, capture search, generation) through
- * the project API. One implementation for every place the agent runs - the
- * batch test page, the canvas node, the end-to-end harness - which differ only
- * in how a picture becomes a data URL and what they show while it works.
+ * the project API. Shared by the batch test page and the scene editor, which
+ * differ only in how a picture becomes a data URL and what they show while it
+ * works.
  */
 import type { AgentHost } from '../agent/tools.ts';
 import type { Layout } from '../core/types.ts';
@@ -20,7 +20,7 @@ export interface ProjectHostOptions {
   onJob?: (job: Job) => void;
 }
 
-export function projectHost(projectId: string, layout: Layout, o: ProjectHostOptions): AgentHost & { job(): Job | null } {
+export function projectHost(projectId: string, layout: Layout, o: ProjectHostOptions): AgentHost {
   let job: Job | null = null;
   return {
     layout,
@@ -44,6 +44,5 @@ export function projectHost(projectId: string, layout: Layout, o: ProjectHostOpt
       o.onJob?.(job);
       return { jobId: job.id };
     },
-    job: () => job,
   };
 }

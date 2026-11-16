@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { horizontalScale } from './align.ts';
-import { bottomOf, dropTo, straighten, supportTilt } from './seat.ts';
+import { bottomOf, dropTo, supportTilt } from './seat.ts';
 import type { Gaussians } from './gaussians.ts';
 import { transformGaussians } from './gaussians.ts';
 import { compileCaption } from './caption.ts';
@@ -206,18 +206,14 @@ function boxSplats(w: number, h: number, d: number): Gaussians {
   return { count: n, positions: new Float32Array(pts), scales: new Float32Array(n * 3).fill(Math.log(0.01)), rotations: new Float32Array(n * 4).map((_, i) => (i % 4 === 3 ? 1 : 0)), alphas: new Float32Array(n).fill(1), colors: new Float32Array(n * 3) };
 }
 
-test('seat: a box SAM 3D tilted 8° is levelled about its base, then dropped onto its support', () => {
+test('seat: the support plane of a box tilted 8° reads 8°, of a level box 0°; dropped onto its support', () => {
   const g = boxSplats(1.2, 0.8, 0.6);
   const a = (8 * Math.PI) / 180;
   transformGaussians(g, [[Math.cos(a), -Math.sin(a), 0], [Math.sin(a), Math.cos(a), 0], [0, 0, 1]], 1, [0.5, -1.2, 0.3]); // tilt about z, move
-  const before = supportTilt(g)!;
-  assert.ok(Math.abs(before.tiltDeg - 8) < 1.5, `tilt read ${before.tiltDeg}`);
-  const s = straighten(g);
-  assert.ok(s.straightened);
-  assert.ok(supportTilt(g)!.tiltDeg < 1, `after ${supportTilt(g)!.tiltDeg}`);
-  dropTo(g, -1.5);
-  assert.ok(Math.abs(bottomOf(g)! + 1.5) < 0.02, `bottom ${bottomOf(g)}`);
-  // A level box is left as it is.
+  const tilted = supportTilt(g)!;
+  assert.ok(Math.abs(tilted.tiltDeg - 8) < 1.5, `tilt read ${tilted.tiltDeg}`);
   const level = boxSplats(1, 1, 1);
-  assert.equal(straighten(level).straightened, false);
+  assert.ok(supportTilt(level)!.tiltDeg < 0.5, `level read ${supportTilt(level)!.tiltDeg}`);
+  dropTo(level, -1.5);
+  assert.ok(Math.abs(bottomOf(level)! + 1.5) < 0.02, `bottom ${bottomOf(level)}`);
 });

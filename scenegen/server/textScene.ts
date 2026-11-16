@@ -3,9 +3,12 @@
  * scene that sits in the layout's own world (metres, Y up, floor at 0).
  *
  *   conditions  capture point (searched if the layout has none) + equirect depth / semantic / clay renders
- *   pano        a provider paints the panorama from them
- *   scale       metres per JST-2 unit: from the provider's own reconstruction, else a calibration custom-pano
- *   scene       custom-pano at the capture pose with that scale → scene.spz in our world
+ *   pano        a provider paints the panorama from them (on demand: more only when the first falls short)
+ *   scene       custom-pano at the capture pose, at 1 unit = 1
+ *   scale       metres per JST-2 unit, measured on that reconstruction's floor; the file is scaled to metres
+ *   fill        gap views generated and the environment rebuilt (fill.ts)
+ *   objects     key objects painted into their crops and made by SAM 3D (objects.ts), in parallel
+ *   compose     environment + placed objects → scene.spz (seatScene.placeScene)
  *   verify      floor height and depth agreement with the blockout
  */
 import { existsSync } from 'node:fs';
@@ -24,17 +27,17 @@ import { placeScene } from './seatScene.ts';
 import type { PlaceItem } from './seatScene.ts';
 import { MASK_GRID } from '../core/place.ts';
 import { depthImage, depthRange, renderEquirect, semanticImage, shadedImage } from '../core/render.ts';
-import { distanceToFloor, readSpz } from '../core/spz.ts';
+import { readSpz } from '../core/spz.ts';
 import type { Layout } from '../core/types.ts';
 import { EYE_HEIGHT } from '../core/types.ts';
 import { scorePanoramas } from './alignScore.ts';
-import { autoFill, fillBudget } from './fill.ts';
-import type { PastJob } from './expand.ts';
-import { cropFor, decodeRgb, environmentLayout, generateObjects, paintedMask, planObjects } from './objects.ts';
-import type { ObjectAsset } from './objects.ts';
+import { autoFill, fillBudget, metersPerUnitFromFloor } from './fill.ts';
 import type { FillResult } from './fill.ts';
-import { Jst2Client, newSessionId } from './jst2.ts';
-import type { PanoProvider, PeopleCheck } from './pano.ts';
+import { newSessionId } from './jst2.ts';
+import type { Jst2Client } from './jst2.ts';
+import { cropFor, decodeRgb, environmentLayout, generateObjects, paintedMask, planObjects } from './objects.ts';
+import type { ObjectAsset, Sam3dFn } from './objects.ts';
+import type { PanoOutput, PanoProvider, PeopleCheck } from './pano.ts';
 import { encodePng } from './png.ts';
 
 export interface TextSceneResult {
@@ -43,10 +46,11 @@ export interface TextSceneResult {
   provider: string;
   depthRange: { zMin: number; zMax: number };
   metersPerUnit: number;
-  /** The JST-2 session is at 1 unit = 1 (poses go to it divided by metersPerUnit). */
+  /** The JST-2 session is at 1 unit = 1 (poses go to it divided by metersPerUnit). Missing on older scenes. */
   sessionInUnits?: boolean;
   /** Earlier jobs on this project (a generation before an expansion or a retry), for the log. */
   pastJobs?: PastJob[];
+  /** Always 'provider-reconstruction' now; 'calibration' on older scenes. */
   scaleSource: 'provider-reconstruction' | 'calibration';
   sessionId: string;
   batchIds: string[];
@@ -71,9 +75,23 @@ export interface TextSceneResult {
 
 export interface PanoCandidate { file: string; objects: number | null; shell: number | null; people: { people: boolean; prominent: boolean; note: string } | null }
 
+type PaintFn = NonNullable<Parameters<typeof generateObjects>[4]['paint']>['run'];
+
+/** A finished job's log, kept on the result when a later job (expand, retry) replaces it on the project. */
+export interface PastJob { kind: string; log: string[]; startedAt: number; endedAt?: number; status: string }
+
+/** `result` with `previousJob` appended to its past jobs. */
+export function withPastJob<T extends { pastJobs?: PastJob[] }>(result: T, previousJob: PastJob | null | undefined): T {
+  return { ...result, pastJobs: [...(result.pastJobs ?? []), ...(previousJob ? [previousJob] : [])] };
+}
+
 export type Progress = (stage: 'conditions' | 'pano' | 'scale' | 'scene' | 'fill' | 'objects' | 'compose' | 'verify' | 'done', message: string) => void;
 
 const W = 2048, H = 1024;
+/** Keep the first panorama whose alignment with the blockout (0-1) reaches this. */
+const GOOD_ENOUGH = 0.8;
+/** The scene file's frame: the capture point at the origin, facing the capture yaw. */
+const filePose = (capture: CameraPose): CameraPose => ({ position: [0, 0, 0], yaw: capture.yaw });
 
 /** The space in numbers, for the image model: room size, ceiling, camera height, nearest walls. */
 export function geometryNote(layout: Layout, capture: CameraPose): string {
@@ -108,6 +126,18 @@ export async function renderConditions(layout: Layout, dir: string) {
     writeFile(join(dir, 'shaded.png'), shaded),
   ]);
   return { capture, buffers: r, range, legend: sem.legend, depth, semantic, shaded };
+}
+
+/** The environment's horizontal size over the blockout's (its walls against the blockout's). */
+function measureEnvScale(envSpz: Uint8Array, envLayout: Layout, capture: CameraPose): number | null {
+  return horizontalScale(readSpz(envSpz), renderEquirect(buildScene(envLayout), capture, 512, 256), filePose(capture));
+}
+
+/** Depth agreement of the final scene with the blockout, the floor reported in the layout's world. */
+function verifyAlignment(sceneSpz: Uint8Array, layout: Layout, capture: CameraPose): Alignment {
+  // Blockout rendered at the capture point, splats seen from the file's origin: the same rays.
+  const measured = measureAlignment(readSpz(sceneSpz), renderEquirect(buildScene(layout), capture, 256, 128), filePose(capture));
+  return { ...measured, floorY: measured.floorY === null ? null : Math.round((measured.floorY + capture.position[1]) * 100) / 100 };
 }
 
 /** The environment's measured scale, if it is off by enough to move the objects (and plausible). */
@@ -161,7 +191,12 @@ export async function composeScene(dir: string, layout: Layout, capture: CameraP
  * from the crops already painted; then the scene is composed again. The environment was painted
  * without them, so this is how they get back into the scene.
  */
-export async function retryObjects(dir: string, deps: { sam3d: (image: Uint8Array, box: [number, number, number, number]) => Promise<{ ply: Uint8Array; seconds: number }>; onProgress?: Progress; /** The job this one replaces, kept in the result so the log stays whole. */ previousJob?: PastJob | null }): Promise<TextSceneResult> {
+export async function retryObjects(dir: string, deps: {
+  sam3d: Sam3dFn;
+  onProgress?: Progress;
+  /** The job this one replaces, kept in the result so the log stays whole. */
+  previousJob?: PastJob | null;
+}): Promise<TextSceneResult> {
   const p = deps.onProgress ?? (() => {});
   const result = JSON.parse(await readFile(join(dir, 'result.json'), 'utf8')) as TextSceneResult;
   const layout = JSON.parse(await readFile(join(dir, 'layout.json'), 'utf8')) as Layout;
@@ -175,24 +210,29 @@ export async function retryObjects(dir: string, deps: { sam3d: (image: Uint8Arra
   });
   const objects = result.objects.map((o) => redone.find((r) => r.id === o.id) ?? o);
   const envSpz = new Uint8Array(await readFile(join(dir, result.files.environment)));
+  // Not measured when no object had come through the first time.
   let envScale = result.envScale;
-  if (envScale === null && objects.some((o) => o.file)) {
-    const envLayout = { ...environmentLayout(layout, planObjects(layout).remove), capture };
-    envScale = horizontalScale(readSpz(envSpz), renderEquirect(buildScene(envLayout), capture, 512, 256), { position: [0, 0, 0], yaw: capture.yaw });
-  }
+  if (envScale === null && objects.some((o) => o.file)) envScale = measureEnvScale(envSpz, { ...environmentLayout(layout, planObjects(layout).remove), capture }, capture);
   p('compose', 'Composing the scene again');
   const finalSpz = await composeScene(dir, layout, capture, envSpz, objects, shiftOf(envScale));
-  const measured = measureAlignment(readSpz(finalSpz), renderEquirect(buildScene(layout), capture, 256, 128), { position: [0, 0, 0], yaw: capture.yaw });
-  const out: TextSceneResult = { ...result, pastJobs: [...(result.pastJobs ?? []), ...(deps.previousJob ? [deps.previousJob] : [])], objects, envScale, alignment: { ...measured, floorY: measured.floorY === null ? null : Math.round((measured.floorY + capture.position[1]) * 100) / 100 } };
+  const out: TextSceneResult = { ...withPastJob(result, deps.previousJob), objects, envScale, alignment: verifyAlignment(finalSpz, layout, capture) };
   await writeFile(join(dir, 'result.json'), JSON.stringify(out, null, 2));
-  const ok = redone.filter((o) => o.file).length;
-  p('done', `${ok} of ${redone.length} object(s) now in the scene`);
+  p('done', `${redone.filter((o) => o.file).length} of ${redone.length} object(s) now in the scene`);
   return out;
 }
 
-export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst2Client; provider: PanoProvider; prompt?: string; styleImage?: { bytes: Uint8Array; mime: string }; maxFills?: number | 'auto'; vision?: PeopleCheck; /** Keep the first panorama whose alignment with the blockout reaches this (0-1, default 0.8). */ goodEnough?: number;
+export async function textToScene(layout: Layout, dir: string, deps: {
+  jst2: Jst2Client;
+  provider: PanoProvider;
+  prompt?: string;
+  styleImage?: { bytes: Uint8Array; mime: string };
+  maxFills?: number | 'auto';
+  vision?: PeopleCheck;
   /** Generate key objects separately (SAM 3D) and the environment without them. Off: one 3DGS of everything. */
-  objects?: { sam3d: (image: Uint8Array, box: [number, number, number, number]) => Promise<{ ply: Uint8Array; seconds: number }>; paint: (input: { image: Uint8Array; guide: Uint8Array; size: number; box: [number, number, number, number]; label: string; style?: string }) => Promise<Uint8Array> }; signal?: AbortSignal; onProgress?: Progress }): Promise<TextSceneResult> {
+  objects?: { sam3d: Sam3dFn; paint: PaintFn };
+  signal?: AbortSignal;
+  onProgress?: Progress;
+}): Promise<TextSceneResult> {
   const p = deps.onProgress ?? (() => {});
   const seconds: Record<string, number> = {};
   let t = Date.now();
@@ -201,13 +241,13 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
 
   p('conditions', 'Finding the capture point and rendering the blockout');
   // With SAM 3D objects, the environment is painted from the blockout WITHOUT them (the full blockout,
-  // rendered from the same point, only guides where they are painted into the object panorama).
+  // rendered from the same point, only guides where they are painted into their crops).
   const full = deps.objects ? await renderConditions(layout, join(dir, 'blockout-full')) : null;
   const plan = deps.objects ? planObjects(layout) : { assets: [], remove: new Set<number>() };
-  // Its caption must not name them either - the user's words and the materials line do, and the image
-  // model paints what the text names whatever the depth map says (measured: with the user's words the
-  // counter, sofa and table came back; without them, the counter the style summary named still did). So: no user prompt, no style summary, no materials (palette and lighting stay), and the removed
-  // things named as absent.
+  // Its caption must not name them either: the image model paints what the text names whatever the
+  // depth map says (measured: with the user's words the counter, sofa and table came back; without
+  // them, the counter the style summary named still did). So: no user prompt, no style summary, no
+  // materials (palette and lighting stay), and the removed things named as absent.
   const removed = [...plan.remove].map((i) => layout.objects[i]!.label);
   const envLayout = plan.remove.size ? { ...environmentLayout(layout, plan.remove), prompt: '', style: { ...layout.style, summary: '', materials: '' }, capture: full!.capture } : layout;
   const c = await renderConditions(envLayout, dir);
@@ -215,7 +255,6 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
   // THE SCENE FILE'S FRAME: the capture point at the origin, metres, +Y up (the floor at y = -1.5) -
   // what the director assumes of every generated scene (its placement, gap check and fill measure from
   // the file's origin). The blockout is the same frame shifted by the capture point; the layout file says so.
-  const filePose: CameraPose = { position: [0, 0, 0], yaw: c.capture.yaw };
   const origin = c.capture.position;
   await writeFile(join(dir, 'layout.json'), JSON.stringify({ ...layout, capture: c.capture, sceneFrame: { origin, note: 'The .spz origin is the capture point `origin` of this layout (metres, +Y up). A layout point p is at p - origin in the file; in the director (which puts the capture point at x = z = 0, floor y = 0) it is at [p.x - origin.x, p.y, p.z - origin.z].' } }, null, 2));
   await writeFile(join(dir, 'prompt.txt'), prompt);
@@ -229,58 +268,53 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
   // Painted ON DEMAND: one first, scored against the blockout (edge alignment above chance, 0-1,
   // absolute per image) and checked for life-size figures; kept if it is good enough. Otherwise two
   // more at once, and the best clean one of the three is kept; three with a figure in each get one
-  // last pair. The same images go on scoring against each other: picking the best of three took
-  // alignment from 0.67 to 0.84 on one café, but most first paintings already clear the bar.
+  // last pair. Picking the best of three took alignment from 0.67 to 0.84 on one café, but most first
+  // paintings already clear the bar.
   const many = deps.provider.id === 'openai-image';
-  const goodEnough = deps.goodEnough ?? 0.8;
   const batches = many ? [1, 2, 2] : [1];
   const geometry = geometryNote(envLayout, c.capture);
-  const paint = () => deps.provider.generate({ prompt, depth: c.depth, semantic: c.semantic, shaded: c.shaded, geometry, withClay: many, styleImage: many ? undefined : deps.styleImage, signal: deps.signal, onProgress: () => {} });
+  const paint = () => deps.provider.generate({ prompt, depth: c.depth, semantic: c.semantic, shaded: c.shaded, geometry, withClay: many, styleImage: many ? undefined : deps.styleImage, signal: deps.signal });
   await mkdir(join(dir, 'candidates'), { recursive: true });
   const candidates: PanoCandidate[] = [];
-  let panoAttempts = 0;
-  let chosen: { pano: Awaited<ReturnType<typeof paint>>; index: number } | null = null;
-  const kept: Array<{ pano: Awaited<ReturnType<typeof paint>>; index: number }> = [];
+  const panos: PanoOutput[] = []; // index-aligned with candidates
+  const bestAligned = (indices: number[]) => indices.reduce((a, b) => ((candidates[b]!.objects ?? -1) > (candidates[a]!.objects ?? -1) ? b : a));
+  let chosen: number | null = null;
   for (const [round, n] of batches.entries()) {
     p('pano', round === 0 ? `Painting the panorama (${deps.provider.label})` : `Painting ${n} more panorama candidate${n > 1 ? 's' : ''}`);
     const painted = await Promise.all(Array.from({ length: n }, () => paint()));
     const start = candidates.length;
-    panoAttempts += n;
     for (const [i, pano] of painted.entries()) {
       credits += pano.credits ?? 0;
-      const file = join(dir, 'candidates', `cand-${start + i}.${pano.mime === 'image/png' ? 'png' : 'jpg'}`);
-      await writeFile(file, pano.bytes);
-      candidates.push({ file: `candidates/${file.split('/').pop()}`, objects: null, shell: null, people: null });
+      const file = `candidates/cand-${start + i}.${pano.mime === 'image/png' ? 'png' : 'jpg'}`;
+      await writeFile(join(dir, file), pano.bytes);
+      candidates.push({ file, objects: null, shell: null, people: null });
+      panos.push(pano);
     }
     p('pano', 'Scoring against the blockout and checking for figures');
     const [scores, checks] = await Promise.all([
       many ? scorePanoramas(join(dir, 'semantic.png'), candidates.slice(start).map((x) => join(dir, x.file))) : Promise.resolve(null),
       Promise.all(painted.map((x) => (deps.vision ? deps.vision(x.bytes).catch(() => null) : Promise.resolve(null)))),
     ]);
-    painted.forEach((pano, i) => {
+    painted.forEach((_, i) => {
       const cand = candidates[start + i]!;
       if (scores) { cand.objects = scores[i]!.objects; cand.shell = scores[i]!.shell; }
       cand.people = checks[i] ?? null;
-      kept.push({ pano, index: start + i });
     });
-    const clean = kept.filter(({ index }) => !candidates[index]!.people?.prominent);
-    const best = clean.length ? clean.reduce((a, b) => ((candidates[b.index]!.objects ?? -1) > (candidates[a.index]!.objects ?? -1) ? b : a)) : null;
-    const score = best ? candidates[best.index]!.objects : null;
-    const last = round === batches.length - 1;
+    const clean = candidates.map((_, i) => i).filter((i) => !candidates[i]!.people?.prominent);
+    const best = clean.length ? bestAligned(clean) : null;
+    const score = best === null ? null : candidates[best]!.objects;
     // Good enough (or no scorer to tell: keep the first clean one); after the second round, the best
     // clean one whatever its score; a figure in every one painted so far: paint again.
-    if (best && (score === null || score >= goodEnough || round >= 1)) { chosen = best; break; }
-    if (best) p('pano', `Alignment ${score!.toFixed(2)} is under ${goodEnough}: painting more to choose from`);
-    else if (!last) p('pano', `A figure in every candidate so far (${candidates[start]!.people?.note ?? ''}): painting again`);
+    if (best !== null && (score === null || score >= GOOD_ENOUGH || round >= 1)) { chosen = best; break; }
+    if (best !== null) p('pano', `Alignment ${score!.toFixed(2)} is under ${GOOD_ENOUGH}: painting more to choose from`);
+    else if (round < batches.length - 1) p('pano', `A figure in every candidate so far (${candidates[start]!.people?.note ?? ''}): painting again`);
   }
-  // A figure in every candidate: keep the best-aligned one anyway, and say so.
-  if (!chosen) {
-    const index = candidates.map((_, i) => i).reduce((a, b) => ((candidates[b]!.objects ?? -1) > (candidates[a]!.objects ?? -1) ? b : a));
-    chosen = kept.find((k) => k.index === index)!;
-  }
-  const pano = chosen.pano;
-  const panoCheck = candidates[chosen.index]!.people;
-  p('pano', `Kept candidate ${chosen.index + 1} of ${candidates.length} painted${candidates[chosen.index]!.objects !== null ? ` (alignment ${candidates[chosen.index]!.objects!.toFixed(2)})` : ''}`);
+  // A figure in every candidate: keep the best-aligned one anyway.
+  chosen ??= bestAligned(candidates.map((_, i) => i));
+  const pano = panos[chosen]!;
+  const panoCheck = candidates[chosen]!.people;
+  const chosenScore = candidates[chosen]!.objects;
+  p('pano', `Kept candidate ${chosen + 1} of ${candidates.length} painted${chosenScore !== null ? ` (alignment ${chosenScore.toFixed(2)})` : ''}`);
   const panoName = pano.mime === 'image/png' ? 'panorama.png' : 'panorama.jpg';
   await writeFile(join(dir, panoName), pano.bytes);
   lap('pano');
@@ -304,21 +338,19 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
   objectsJob.catch(() => {});
 
   // ONE environment build: at 1 unit = 1, measured on itself (the capture point is EYE_HEIGHT above
-  // the floor), then scaled into metres here. It used to be built twice - a calibration scene to
-  // measure, then the real one at that scale: 20-35 s and 6 credits more for the same result, since
-  // JST-2's scale is uniform. The session stays in units: fill sends its poses divided by the scale.
+  // the floor), then scaled into metres here. JST-2's scale is uniform, so a separate calibration
+  // build (20-35 s and 6 credits) would give the same result. The session stays in units: fill sends
+  // its poses divided by the scale.
   p('scene', 'Building the environment at the capture point');
   const sessionId = newSessionId('sg');
-  let task = await deps.jst2.customPano({ sessionId, panorama: pano.bytes, mime: pano.mime, c2w: toServiceC2W(filePose), metersPerUnit: 1 });
+  let task = await deps.jst2.customPano({ sessionId, panorama: pano.bytes, mime: pano.mime, c2w: toServiceC2W(filePose(c.capture)), metersPerUnit: 1 });
   credits += task.credits ?? 0;
   task = await deps.jst2.wait(task, { signal: deps.signal });
   const raw = await deps.jst2.download(task.result!.spz.url);
   lap('scene');
   p('scale', 'Measuring how big a JST-2 unit is (on the environment itself)');
-  const scaleSource: TextSceneResult['scaleSource'] = 'provider-reconstruction';
-  const unitsToFloor = distanceToFloor(readSpz(raw), [0, 0, 0], [0, -1, 0], { radius: 0.08, maxDistance: 10 });
-  if (unitsToFloor === null || !(unitsToFloor > 0)) throw new Error('Could not find the floor under the capture point in the reconstruction.');
-  const metersPerUnit = Math.round((EYE_HEIGHT / unitsToFloor) * 1000) / 1000;
+  const metersPerUnit = metersPerUnitFromFloor(raw, EYE_HEIGHT);
+  if (metersPerUnit === null) throw new Error('Could not find the floor under the capture point in the reconstruction.');
   const spz = scaleSpz(raw, metersPerUnit);
   p('scale', `1 unit = ${metersPerUnit} m`);
   lap('scale');
@@ -342,22 +374,18 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
   const objects = await objectsJob;
   lap('compose');
   // The composed scene: the environment and every object, one file (the director loads one), in the
-  // scene's frame - capture point at the origin, metres, Y up. The viewer loads the parts separately.
-  // The objects were placed by the blockout; the environment may have come out a little smaller or
-  // larger (horizontally). Move each object to the same place IN the environment - its offset from
-  // the capture point scaled by how the environment's walls compare with the blockout's - so a
-  // counter against the wall stands at the scene's wall, not inside or behind it. Sizes stay.
-  const envScale = objects.some((o) => o.file) ? horizontalScale(readSpz(envSpz), renderEquirect(buildScene(envLayout), c.capture, 512, 256), filePose) : null;
+  // scene's frame. The objects were placed by the blockout; the environment may have come out a
+  // little smaller or larger (horizontally). Move each object to the same place IN the environment -
+  // its offset from the capture point scaled by how the environment's walls compare with the
+  // blockout's - so a counter against the wall stands at the scene's wall, not inside or behind it.
+  const envScale = objects.some((o) => o.file) ? measureEnvScale(envSpz, envLayout, c.capture) : null;
   const shift = shiftOf(envScale);
   if (shift !== null) p('objects', `The environment is ${Math.round(shift * 100)}% of the blockout's size: moving the objects to match`);
   p('compose', 'Placing the objects: cleaned, stood up, squared with the blockout, seated, kept out of the walls and each other');
   const finalSpz = await composeScene(dir, layout, c.capture, envSpz, objects, shift, (bad) => { if (bad.length) p('compose', `Does not fit its blockout box even placed (SAM 3D gave something else?): ${bad.join(', ')}`); });
 
   p('verify', 'Checking the scene against the blockout');
-  const lowRes = renderEquirect(buildScene(layout), c.capture, 256, 128);
-  // Blockout rendered at the capture point, splats seen from the file's origin: the same rays.
-  const measured = measureAlignment(readSpz(finalSpz), lowRes, filePose);
-  const alignment = { ...measured, floorY: measured.floorY === null ? null : Math.round((measured.floorY + origin[1]) * 100) / 100 };
+  const alignment = verifyAlignment(finalSpz, layout, c.capture);
   lap('verify');
 
   const result: TextSceneResult = {
@@ -367,16 +395,16 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
     depthRange: c.range,
     metersPerUnit,
     sessionInUnits: true,
-    scaleSource,
+    scaleSource: 'provider-reconstruction',
     sessionId,
     batchIds,
     credits,
     alignment,
     fill,
     panoCheck,
-    panoAttempts,
+    panoAttempts: candidates.length,
     candidates,
-    chosen: chosen.index,
+    chosen,
     objects,
     envScale,
     files: { depth: 'depth.png', semantic: 'semantic.png', shaded: 'shaded.png', panorama: panoName, blockoutFull: plan.assets.length ? 'blockout-full/shaded.png' : null, environment: 'environment.spz', scene: 'scene.spz', layout: 'layout.json' },

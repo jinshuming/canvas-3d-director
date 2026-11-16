@@ -11,23 +11,25 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { toServiceC2W } from '../core/frame.ts';
-import type { CameraPose, Vec3 } from '../core/frame.ts';
+import type { CameraPose } from '../core/frame.ts';
 import { scaleSpz } from '../core/gaussians.ts';
 import type { Layout } from '../core/types.ts';
+import { sessionPose } from './fill.ts';
 import type { Jst2Client } from './jst2.ts';
 import type { ObjectAsset } from './objects.ts';
-import { composeScene, shiftOf } from './textScene.ts';
+import { composeScene, shiftOf, withPastJob } from './textScene.ts';
+import type { PastJob } from './textScene.ts';
 
 export interface ExpandRecord { pose: CameraPose; fov: number; batchId: string; image: string | null; credits: number; at: string }
-export interface PastJob { kind: string; log: string[]; startedAt: number; endedAt?: number; status: string }
 
 /** What a scene's result has that expanding needs (both routes write these). */
 interface Expandable {
   sessionId: string; batchIds: string[]; metersPerUnit: number; credits: number;
-  /** The JST-2 session was built at 1 unit = 1 (scenes made since the single-build change); else in metres. */
+  /** The JST-2 session was built at 1 unit = 1; missing on older scenes, whose session is in metres. */
   sessionInUnits?: boolean;
   files: Record<string, string | null>;
   objects?: ObjectAsset[];
+  envScale?: number | null;
   expands?: ExpandRecord[];
   pastJobs?: PastJob[];
 }
@@ -48,8 +50,7 @@ export async function expandScene(dir: string, kind: 'text' | 'video', pose: Cam
   const fov = Math.max(20, Math.min(140, deps.fov ?? 90));
   const at = pose.position.map((v) => v.toFixed(1)).join(', ');
   p('expand', `Generating the view at (${at}) m, facing ${Math.round(pose.yaw)}°, pitch ${Math.round(pose.pitch ?? 0)}°`);
-  const sent: CameraPose = { ...pose, position: [pose.position[0] / unit, pose.position[1] / unit, pose.position[2] / unit] as Vec3 };
-  const g = await deps.jst2.wait(await deps.jst2.generate({ sessionId: result.sessionId, referenceBatchIds: result.batchIds, targetC2w: toServiceC2W(sent), projection: 'perspective', fov }), { signal: deps.signal });
+  const g = await deps.jst2.wait(await deps.jst2.generate({ sessionId: result.sessionId, referenceBatchIds: result.batchIds, targetC2w: toServiceC2W(sessionPose(pose, unit)), projection: 'perspective', fov }), { signal: deps.signal });
   let credits = g.credits ?? 0;
   const batch = g.result!.outputBatch!;
   const n = (result.expands?.length ?? 0) + 1;
@@ -72,16 +73,15 @@ export async function expandScene(dir: string, kind: 'text' | 'video', pose: Cam
     await writeFile(join(dir, result.files.environment ?? 'environment.spz'), env);
     p('compose', 'Composing the scene with its objects again');
     const layout = JSON.parse(await readFile(join(dir, 'layout.json'), 'utf8')) as Layout;
-    await composeScene(dir, layout, layout.capture!, env, result.objects ?? [], shiftOf((result as { envScale?: number | null }).envScale ?? null));
+    await composeScene(dir, layout, layout.capture!, env, result.objects ?? [], shiftOf(result.envScale ?? null));
   } else {
     await writeFile(join(dir, result.files.scene ?? 'scene.spz'), env);
   }
   const out: Expandable = {
-    ...result,
+    ...withPastJob(result, deps.previousJob),
     batchIds,
     credits: result.credits + credits,
     expands: [...(result.expands ?? []), { pose, fov, batchId: batch.batchId, image, credits, at: new Date().toISOString() }],
-    pastJobs: [...(result.pastJobs ?? []), ...(deps.previousJob ? [deps.previousJob] : [])],
   };
   await writeFile(join(dir, 'result.json'), JSON.stringify(out, null, 2));
   p('done', `Expanded from (${at}) m: ${credits} credits`);

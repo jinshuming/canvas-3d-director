@@ -31,7 +31,6 @@ export interface NodeInputs { text: string; imageSrc: string | null }
 interface Props {
   node: CanvasNode;
   inputs: NodeInputs;
-  onPatch: (patch: Partial<CanvasNode>) => void;
   onSendToWorld: (world: { worldId: string; title: string }) => void;
 }
 
@@ -48,10 +47,10 @@ export function statusOf(p: Project | null): SceneStatus {
 }
 
 /** The node's project, polled while its job runs; `version` (a run started or ended) fetches it again. */
-function useProject(id: string | undefined, version: number) {
+function useProject(id: string | undefined, version: number): Project | null {
   const [project, setProject] = useState<Project | null>(null);
   useEffect(() => (id ? watchProject(id, setProject) : undefined), [id, version]);
-  return { project };
+  return project;
 }
 
 /** Export the project's scene, make a 导演台 (World) whose stage has it, and say which. */
@@ -81,7 +80,7 @@ function Progress({ project, local }: { project: Project | null; local: RunStatu
   );
 }
 
-function ResultActions({ project, node, cover, onSendToWorld }: { project: Project; node: CanvasNode; cover: string | null; onSendToWorld: Props['onSendToWorld'] }) {
+function ResultActions({ project, node, cover, onSendToWorld }: Pick<Props, 'node' | 'onSendToWorld'> & { project: Project; cover: string | null }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   return (
@@ -126,6 +125,19 @@ function usePublish(nodeId: string, draft: SceneDraft, status: SceneStatus, serv
   }, [nodeId, status, serverVideo, draft.status, draft.serverVideo]);
 }
 
+/** Under the card: the progress, the way on once it is done, or why the last run failed. */
+function Foot({ node, project, draft, status, done, cover, onSendToWorld }: Pick<Props, 'node' | 'onSendToWorld'> & { project: Project | null; draft: SceneDraft; status: SceneStatus; done: boolean; cover: string | null }) {
+  const error = draft.error ?? (project?.job?.status === 'failed' ? project.job.error : null);
+  return (
+    <div className="cv-sg-foot">
+      {status === 'generating' ? <Progress project={project} local={draft.local} />
+        : done ? <ResultActions project={project!} node={node} cover={cover} onSendToWorld={onSendToWorld} />
+        : error ? <small className="cv-sg-err">{error}</small>
+        : null}
+    </div>
+  );
+}
+
 function StateBadge({ status }: { status: SceneStatus }) {
   return <span className={`cv-sg-state ${status}`}>{status === 'generating' && <span className="cv-sg-pulse" />}{STATUS_LABEL[status]}</span>;
 }
@@ -163,19 +175,20 @@ function Waiting({ kind, draft, inputs, serverVideo }: { kind: 'scenegen' | 'sce
 /** 场景生成: text / picture / video in, a generated 3DGS scene out. */
 export function SceneGenCard({ node, inputs, onSendToWorld }: Props) {
   const draft = useDraft(node.id, node.text ?? '');
-  const { project } = useProject(node.projectId, draft.version);
+  const project = useProject(node.projectId, draft.version);
   const job = project?.job;
   const status: SceneStatus = draft.local ? 'generating' : statusOf(project);
-  const result = project?.result as { objects?: Array<{ file: string | null }>; files?: { panorama?: string }; alignment?: { floorY: number | null; objectsWithin25: number }; fill?: { after?: { worstHole: number } } | null; credits?: number } | null | undefined;
+  const result = project?.result as { objects?: Array<{ file: string | null }>; files?: { panorama?: string }; alignment?: { objectsWithin25: number }; credits?: number } | null | undefined;
   const opener = useOpener(node, project);
   usePublish(node.id, draft, status, false, project);
-  const done = status === 'done' && result?.files?.panorama;
+  const panorama = result?.files?.panorama;
+  const done = status === 'done' && Boolean(panorama);
   return (
     <div className={`cv-sg-card ${status}${'onClick' in opener ? ' openable' : ''}`} {...opener}>
       <StateBadge status={status} />
       {done ? (
         <div className="cv-sg-cover">
-          <img src={file(project!.id, `out/${result!.files!.panorama!}`, job?.endedAt)} alt="" draggable={false} />
+          <img src={file(project!.id, `out/${panorama}`, job?.endedAt)} alt="" draggable={false} />
           <div className="cv-world-shade" />
           <div className="cv-sg-cover-info">
             <strong>{project!.title}</strong>
@@ -185,12 +198,7 @@ export function SceneGenCard({ node, inputs, onSendToWorld }: Props) {
       ) : status === 'generating' ? (
         <Generating image={project && job?.status === 'running' ? file(project.id, 'out/shaded.png', job.startedAt) : null} />
       ) : <Waiting kind="scenegen" draft={draft} inputs={inputs} serverVideo={null} />}
-      <div className="cv-sg-foot">
-        {status === 'generating' ? <Progress project={project} local={draft.local} />
-          : done ? <ResultActions project={project!} node={node} cover={file(project!.id, `out/${result!.files!.panorama!}`)} onSendToWorld={onSendToWorld} />
-          : (draft.error || job?.status === 'failed') ? <small className="cv-sg-err">{draft.error ?? job?.error}</small>
-          : null}
-      </div>
+      <Foot node={node} project={project} draft={draft} status={status} done={done} cover={done ? file(project!.id, `out/${panorama}`) : null} onSendToWorld={onSendToWorld} />
     </div>
   );
 }
@@ -201,7 +209,7 @@ export function SceneGenCard({ node, inputs, onSendToWorld }: Props) {
  */
 export function SceneReconCard({ node, inputs, onSendToWorld }: Props) {
   const draft = useDraft(node.id);
-  const { project } = useProject(node.projectId, draft.version);
+  const project = useProject(node.projectId, draft.version);
   const [views, setViews] = useState<{ stats: Record<string, number>; first: string } | null>(null);
   const job = project?.job;
   const status: SceneStatus = draft.local ? 'generating' : statusOf(project);
@@ -236,12 +244,7 @@ export function SceneReconCard({ node, inputs, onSendToWorld }: Props) {
       ) : status === 'generating' ? (
         <Generating image={project && job?.status === 'running' ? file(project.id, 'out/anchor-stitched.png', job.startedAt) : null} video={draft.video?.url ?? serverVideo} />
       ) : <Waiting kind="scenerecon" draft={draft} inputs={inputs} serverVideo={serverVideo} />}
-      <div className="cv-sg-foot">
-        {status === 'generating' ? <Progress project={project} local={draft.local} />
-          : done ? <ResultActions project={project!} node={node} cover={cover} onSendToWorld={onSendToWorld} />
-          : (draft.error || job?.status === 'failed') ? <small className="cv-sg-err">{draft.error ?? job?.error}</small>
-          : null}
-      </div>
+      <Foot node={node} project={project} draft={draft} status={status} done={done} cover={cover} onSendToWorld={onSendToWorld} />
     </div>
   );
 }

@@ -137,7 +137,7 @@ export function TextProject({ project, config, onChanged }: { project: Project; 
   }
 
   const issues = checkLayout(layout);
-  const r = result as null | { objects?: Array<{ id: string; label: string; file: string | null; crop: string; spread: number | null; gaussians: number | null; seconds: number | null; error: string | null }>; files: Record<string, string>; alignment: { floorY: number | null; within25: number; objectsWithin25: number; medianLogError: number }; metersPerUnit: number; credits: number; provider: string; seconds: Record<string, number>; prompt: string; candidates?: Array<{ file: string; objects: number | null; people: { prominent: boolean } | null }>; chosen?: number; fill: null | { rounds: Array<{ holeBefore: number; holeAfter: number | null; pose: { position: number[]; yaw: number } }>; before: { worstHole: number }; after: { worstHole: number } } };
+  const r = result as null | { objects?: Array<{ id: string; label: string; file: string | null; crop: string; spread: number | null; gaussians: number | null; seconds: number | null; error: string | null }>; files: Record<string, string>; alignment: { floorY: number | null; within25: number; objectsWithin25: number; medianLogError: number }; metersPerUnit: number; capture: { yaw: number }; credits: number; provider: string; seconds: Record<string, number>; prompt: string; candidates?: Array<{ file: string; objects: number | null; people: { prominent: boolean } | null }>; chosen?: number; fill: null | { rounds: Array<{ holeBefore: number; holeAfter: number | null; pose: { position: number[]; yaw: number } }>; before: { worstHole: number }; after: { worstHole: number } } };
   const stamp = job?.endedAt ?? 0;
 
   return (
@@ -177,7 +177,7 @@ export function TextProject({ project, config, onChanged }: { project: Project; 
           <button onClick={() => void refreshConditions()} disabled={!layout.objects.length}>重新渲染</button>
         </div>
         <div className={`pano${tab === 'scene' ? ' tall' : ''}`}>
-          {tab === 'scene' && r ? <SplatViewer url={file(project.id, `out/${r.objects?.some((o) => o.file) && r.files.environment ? r.files.environment : r.files.scene}`, stamp)} objects={r.files.environment ? (r.objects ?? []).filter((o) => o.file).map((o) => ({ id: o.id, label: o.label, url: file(project.id, `out/${o.file}`, stamp) })) : []} yaw={(r as unknown as { capture: { yaw: number } }).capture.yaw} /> : tab === 'pano' && r ? <img src={file(project.id, `out/${r.files.panorama}`, stamp)} alt="" /> : cond ? <img src={cond.files[tab === 'pano' || tab === 'scene' ? 'shaded' : tab]} alt="" /> : <div className="empty">摆好白模后在这里看到全景条件图</div>}
+          {tab === 'scene' && r ? <SplatViewer url={file(project.id, `out/${r.objects?.some((o) => o.file) && r.files.environment ? r.files.environment : r.files.scene}`, stamp)} objects={r.files.environment ? (r.objects ?? []).filter((o) => o.file).map((o) => ({ id: o.id, label: o.label, url: file(project.id, `out/${o.file}`, stamp) })) : []} yaw={r.capture.yaw} /> : tab === 'pano' && r ? <img src={file(project.id, `out/${r.files.panorama}`, stamp)} alt="" /> : cond ? <img src={cond.files[tab === 'pano' || tab === 'scene' ? 'shaded' : tab]} alt="" /> : <div className="empty">摆好白模后在这里看到全景条件图</div>}
         </div>
       </section>
 

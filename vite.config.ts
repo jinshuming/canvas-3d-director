@@ -34,8 +34,8 @@ export default defineConfig(({ mode }) => {
         }],
       }),
       // The scene generator (/scenegen/): text → blockout → 3DGS, video → poses → 3DGS. Separate
-      // from the director; it hands finished scenes to the library above. FAL_KEY enables the
-      // FLUX depth panorama provider; SCENEGEN_POSED_IMAGES_BASE points the video path at a real
+      // from the director; it hands finished scenes to the library above. FAL_KEY enables
+      // SAM 3D objects and the FLUX depth panorama provider; SCENEGEN_POSED_IMAGES_BASE points the video path at a real
       // JST-2 posed-images endpoint (unset: the built-in mock).
       scenegenServer({
         dataDir: here('./.data'),

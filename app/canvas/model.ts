@@ -81,10 +81,15 @@ export function bindWorldNode(nodeId: string, worldId: string, title: string): b
   }
 }
 
+/** A new 导演台 node for a scene node's result: to the scene node's right (wire it from there). */
+export function worldNodeAfter(from: CanvasNode, worldId: string, title: string): CanvasNode {
+  const [w, h] = NODE_SIZE.world;
+  return { id: newId(), kind: 'world', x: from.x + from.w + 120, y: from.y + (from.h - h) / 2, w, h, worldId, title };
+}
+
 /**
- * A scene node's result went to a new 导演台 from the full-screen scene editor: put the 导演台 node
- * to the scene node's right, wired from it - what the canvas does itself when the node's own
- * button sends it.
+ * The full-screen scene editor sent a scene node's result to a new 导演台: add its node to the
+ * stored canvas, as the canvas does itself when the card's own button sends it. Returns its id.
  */
 export function appendWorldAfter(fromId: string, worldId: string, title: string): string | null {
   try {
@@ -93,12 +98,11 @@ export function appendWorldAfter(fromId: string, worldId: string, title: string)
     const s = loadCanvas(() => JSON.parse(raw) as CanvasState);
     const from = s.nodes.find((n) => n.id === fromId);
     if (!from) return null;
-    const [w, h] = NODE_SIZE.world;
-    const id = newId();
-    s.nodes.push({ id, kind: 'world', x: from.x + from.w + 120, y: from.y + (from.h - h) / 2, w, h, worldId, title });
-    s.edges.push({ from: fromId, to: id });
+    const node = worldNodeAfter(from, worldId, title);
+    s.nodes.push(node);
+    s.edges.push({ from: fromId, to: node.id });
     saveCanvas(s);
-    return id;
+    return node.id;
   } catch {
     return null;
   }

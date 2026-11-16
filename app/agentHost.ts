@@ -24,7 +24,7 @@ export function createDirectorHost(o: {
         const lib: Library = await api.library().catch(() => ({ scenes: [], characters: [], motions: [], jobs: [] }));
         if (kind === 'scene') {
           return [
-            ...lib.scenes.map((s) => ({ id: s.id, kind, name: s.name, url: s.url, source: 'generated' as const, viggle: s.viggle, panoramaUrl: s.panoramaUrl, objectsUrl: s.objectsUrl ?? null, relight: s.relight ?? null, lighting: s.lighting ?? null })),
+            ...lib.scenes.map((s) => ({ id: s.id, kind, name: s.name, url: s.url, source: 'generated' as const, viggle: s.viggle, panoramaUrl: s.panoramaUrl, objectsUrl: s.objectsUrl, relight: s.relight, lighting: s.lighting })),
             ...PRESET_SCENES.map((s) => ({ id: s.id, kind, name: s.name, url: s.url, source: 'preset' as const })),
           ];
         }
