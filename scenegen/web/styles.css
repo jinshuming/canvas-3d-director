@@ -102,3 +102,6 @@ main { flex: 1; min-width: 0; overflow: hidden; }
 .result .assets figure { margin: 0; font-size: 11px; }
 .result .assets img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 4px; }
 .result .assets figure.err img { opacity: .4; }
+.splat-viewer .layers label.failed { color: #ff8a80; }
+.splat-viewer .layers label.loading { opacity: .6; }
+.splat-viewer .layers button, .splat-viewer .overlay button { font-size: 11px; margin-top: 4px; }
