@@ -249,3 +249,14 @@ export function bounds(g: Gaussians, q = 0.02, minAlpha = 0.3): { min: [number, 
   }
   return { min, max };
 }
+
+/**
+ * A splat file scaled uniformly about its origin (positions and sizes), e.g. a scene JST-2 built at
+ * 1 unit = 1 into metres. Lossless for what JST-2 writes (SH degree 0); the file is rewritten as v3.
+ */
+export function scaleSpz(bytes: Uint8Array, k: number): Uint8Array {
+  if (k === 1) return bytes;
+  const g = readSpzGaussians(bytes);
+  transformGaussians(g, [[1, 0, 0], [0, 1, 0], [0, 0, 1]], k, [0, 0, 0]);
+  return writeSpzGaussians(g);
+}

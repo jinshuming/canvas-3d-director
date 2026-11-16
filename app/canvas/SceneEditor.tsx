@@ -278,7 +278,9 @@ function GenEditor({ project, reload }: { project: Project; reload: () => Promis
           <span>SAM 3D 物体 <b>{objects.length}</b></span>
           <span>额度 <b>{result.credits}</b></span>
           <span>耗时 <b>{Math.round(Object.values(result.seconds ?? {}).reduce((a, b) => a + b, 0))} 秒</b></span>
-          {(result.objects ?? []).map((o) => <img key={o.id} className="se-thumb" src={file(project.id, `out/${o.crop}`, stamp)} title={o.error ?? o.label} alt="" />)}
+          {(result.objects ?? []).map((o) => <img key={o.id} className={`se-thumb${o.file ? '' : ' failed'}`} src={file(project.id, `out/${o.crop}`, stamp)} title={o.error ? `${o.label}：${o.error}` : o.label} alt="" />)}
+          {(result.objects ?? []).some((o) => !o.file) && <button className="se-btn" onClick={() => void sg.retryObjects(project.id).then(() => reload())}>
+            <Icon name="loop" size={14} />重试失败的物体（{(result.objects ?? []).filter((o) => !o.file).length}）</button>}
         </div>}
       </section>
 

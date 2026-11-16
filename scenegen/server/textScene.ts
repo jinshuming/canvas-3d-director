@@ -18,7 +18,7 @@ import { findCapturePoint } from '../core/capture.ts';
 import { toServiceC2W } from '../core/frame.ts';
 import type { CameraPose } from '../core/frame.ts';
 import { buildScene } from '../core/geometry.ts';
-import { concatGaussians, readSpzGaussians, transformGaussians, writeSpzGaussians } from '../core/gaussians.ts';
+import { concatGaussians, readSpzGaussians, scaleSpz, transformGaussians, writeSpzGaussians } from '../core/gaussians.ts';
 import { depthImage, depthRange, renderEquirect, semanticImage, shadedImage } from '../core/render.ts';
 import { distanceToFloor, readSpz } from '../core/spz.ts';
 import type { Layout } from '../core/types.ts';
@@ -62,7 +62,7 @@ export interface TextSceneResult {
 
 export interface PanoCandidate { file: string; objects: number | null; shell: number | null; people: { people: boolean; prominent: boolean; note: string } | null }
 
-export type Progress = (stage: 'conditions' | 'pano' | 'scale' | 'scene' | 'fill' | 'objects' | 'verify' | 'done', message: string) => void;
+export type Progress = (stage: 'conditions' | 'pano' | 'scale' | 'scene' | 'fill' | 'objects' | 'compose' | 'verify' | 'done', message: string) => void;
 
 const W = 2048, H = 1024;
 
@@ -99,6 +99,66 @@ export async function renderConditions(layout: Layout, dir: string) {
     writeFile(join(dir, 'shaded.png'), shaded),
   ]);
   return { capture, buffers: r, range, legend: sem.legend, depth, semantic, shaded };
+}
+
+/** The environment's measured scale, if it is off by enough to move the objects (and plausible). */
+const shiftOf = (envScale: number | null) => (envScale !== null && envScale > 0.7 && envScale < 1.4 && Math.abs(envScale - 1) > 0.02 ? envScale : null);
+
+/**
+ * Environment + objects into scene.spz (and each object moved to the environment's scale once - its
+ * file rewritten, `shifted` set - so a later compose, after retrying a failed object, leaves it be).
+ */
+export async function composeScene(dir: string, layout: Layout, origin: [number, number, number], envSpz: Uint8Array, objects: ObjectAsset[], shift: number | null): Promise<Uint8Array> {
+  const parts = [readSpzGaussians(envSpz)];
+  for (const o of objects) {
+    if (!o.file) continue;
+    const g = readSpzGaussians(new Uint8Array(await readFile(join(dir, o.file))));
+    const src = layout.objects.find((x) => x.id === o.id);
+    if (shift !== null && src && !o.shifted) {
+      const rel = [src.position[0] - origin[0], src.position[2] - origin[2]];
+      transformGaussians(g, [[1, 0, 0], [0, 1, 0], [0, 0, 1]], 1, [rel[0]! * (shift - 1), 0, rel[1]! * (shift - 1)]);
+      await writeFile(join(dir, o.file), writeSpzGaussians(g));
+    }
+    o.shifted = shift !== null || o.shifted;
+    parts.push(g);
+  }
+  const finalSpz = parts.length > 1 ? writeSpzGaussians(concatGaussians(parts)) : envSpz;
+  await writeFile(join(dir, 'scene.spz'), finalSpz);
+  return finalSpz;
+}
+
+/**
+ * SAM 3D again for the objects whose generation failed (a queue that never moved, a network error),
+ * from the crops already painted; then the scene is composed again. The environment was painted
+ * without them, so this is how they get back into the scene.
+ */
+export async function retryObjects(dir: string, deps: { sam3d: (image: Uint8Array, box: [number, number, number, number]) => Promise<{ ply: Uint8Array; seconds: number }>; onProgress?: Progress }): Promise<TextSceneResult> {
+  const p = deps.onProgress ?? (() => {});
+  const result = JSON.parse(await readFile(join(dir, 'result.json'), 'utf8')) as TextSceneResult;
+  const layout = JSON.parse(await readFile(join(dir, 'layout.json'), 'utf8')) as Layout;
+  const failed = result.objects.filter((o) => !o.file);
+  if (!failed.length) { p('done', 'Every object is already there.'); return result; }
+  const capture = result.capture;
+  const assets = failed.map((o) => layout.objects.find((x) => x.id === o.id)).filter((x): x is Layout['objects'][number] => Boolean(x));
+  p('objects', `SAM 3D again for ${assets.length} object(s): ${failed.map((o) => o.label).join(', ')}`);
+  const redone = await generateObjects({ ...layout, capture }, assets, join(dir, result.files.panorama), dir, {
+    sam3d: deps.sam3d, reuse: new Map(failed.map((o) => [o.id, { crop: o.crop, box: o.box }])), onProgress: (m) => p('objects', m),
+  });
+  const objects = result.objects.map((o) => redone.find((r) => r.id === o.id) ?? o);
+  const envSpz = new Uint8Array(await readFile(join(dir, result.files.environment)));
+  let envScale = result.envScale;
+  if (envScale === null && objects.some((o) => o.file)) {
+    const envLayout = { ...environmentLayout(layout, planObjects(layout).remove), capture };
+    envScale = horizontalScale(readSpz(envSpz), renderEquirect(buildScene(envLayout), capture, 512, 256), { position: [0, 0, 0], yaw: capture.yaw });
+  }
+  p('compose', 'Composing the scene again');
+  const finalSpz = await composeScene(dir, layout, capture.position, envSpz, objects, shiftOf(envScale));
+  const measured = measureAlignment(readSpz(finalSpz), renderEquirect(buildScene(layout), capture, 256, 128), { position: [0, 0, 0], yaw: capture.yaw });
+  const out: TextSceneResult = { ...result, objects, envScale, alignment: { ...measured, floorY: measured.floorY === null ? null : Math.round((measured.floorY + capture.position[1]) * 100) / 100 } };
+  await writeFile(join(dir, 'result.json'), JSON.stringify(out, null, 2));
+  const ok = redone.filter((o) => o.file).length;
+  p('done', `${ok} of ${redone.length} object(s) now in the scene`);
+  return out;
 }
 
 export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst2Client; provider: PanoProvider; prompt?: string; styleImage?: { bytes: Uint8Array; mime: string }; maxFills?: number | 'auto'; vision?: PeopleCheck; candidates?: number;
@@ -201,29 +261,25 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
   // Not awaited until the environment is done; a rejection is caught there, not left unhandled.
   objectsJob.catch(() => {});
 
-  p('scale', 'Measuring how big a JST-2 unit is');
-  let unitsToFloor: number | null = null;
-  let scaleSource: TextSceneResult['scaleSource'] = 'provider-reconstruction';
-  if (pano.probeSpz) unitsToFloor = distanceToFloor(readSpz(pano.probeSpz), [0, 0, 0], [0, -1, 0], { radius: 0.08, maxDistance: 10 });
-  if (unitsToFloor === null) {
-    scaleSource = 'calibration';
-    const cal = await deps.jst2.customPano({ sessionId: newSessionId('sgcal'), panorama: pano.bytes, mime: pano.mime, c2w: toServiceC2W(filePose), metersPerUnit: 1 });
-    credits += cal.credits ?? 0;
-    const done = await deps.jst2.wait(cal, { signal: deps.signal });
-    const pts = readSpz(await deps.jst2.download(done.result!.spz.url));
-    unitsToFloor = distanceToFloor(pts, [0, 0, 0], [0, -1, 0], { radius: 0.08, maxDistance: 10 });
-  }
-  if (unitsToFloor === null || !(unitsToFloor > 0)) throw new Error('Could not find the floor under the capture point in the reconstruction.');
-  const metersPerUnit = Math.round((EYE_HEIGHT / unitsToFloor) * 1000) / 1000;
-  lap('scale');
-
-  p('scene', `Building the environment at the capture point (1 unit = ${metersPerUnit} m)`);
+  // ONE environment build: at 1 unit = 1, measured on itself (the capture point is EYE_HEIGHT above
+  // the floor), then scaled into metres here. It used to be built twice - a calibration scene to
+  // measure, then the real one at that scale: 20-35 s and 6 credits more for the same result, since
+  // JST-2's scale is uniform. The session stays in units: fill sends its poses divided by the scale.
+  p('scene', 'Building the environment at the capture point');
   const sessionId = newSessionId('sg');
-  let task = await deps.jst2.customPano({ sessionId, panorama: pano.bytes, mime: pano.mime, c2w: toServiceC2W(filePose), metersPerUnit });
+  let task = await deps.jst2.customPano({ sessionId, panorama: pano.bytes, mime: pano.mime, c2w: toServiceC2W(filePose), metersPerUnit: 1 });
   credits += task.credits ?? 0;
   task = await deps.jst2.wait(task, { signal: deps.signal });
-  const spz = await deps.jst2.download(task.result!.spz.url);
+  const raw = await deps.jst2.download(task.result!.spz.url);
   lap('scene');
+  p('scale', 'Measuring how big a JST-2 unit is (on the environment itself)');
+  const scaleSource: TextSceneResult['scaleSource'] = 'provider-reconstruction';
+  const unitsToFloor = distanceToFloor(readSpz(raw), [0, 0, 0], [0, -1, 0], { radius: 0.08, maxDistance: 10 });
+  if (unitsToFloor === null || !(unitsToFloor > 0)) throw new Error('Could not find the floor under the capture point in the reconstruction.');
+  const metersPerUnit = Math.round((EYE_HEIGHT / unitsToFloor) * 1000) / 1000;
+  const spz = scaleSpz(raw, metersPerUnit);
+  p('scale', `1 unit = ${metersPerUnit} m`);
+  lap('scale');
 
   let envSpz = spz;
   let batchIds = task.result!.outputBatch ? [task.result!.outputBatch.batchId] : [];
@@ -231,7 +287,7 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
   const maxFills = deps.maxFills === undefined || deps.maxFills === 'auto' ? fillBudget(layout.room ? layout.room.width * layout.room.depth : null) : deps.maxFills;
   if (maxFills > 0) {
     p('fill', `Looking for gaps in the environment (up to ${maxFills} views)`);
-    const f = await autoFill(spz, dir, { jst2: deps.jst2, sessionId, batchIds, capture: [0, 0, 0], maxFills, signal: deps.signal, onProgress: (m) => p('fill', m) });
+    const f = await autoFill(spz, dir, { jst2: deps.jst2, sessionId, batchIds, capture: [0, 0, 0], maxFills, unit: metersPerUnit, signal: deps.signal, onProgress: (m) => p('fill', m) });
     fill = f.result;
     credits += f.result.credits;
     batchIds = f.result.batchIds;
@@ -250,22 +306,9 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
   // the capture point scaled by how the environment's walls compare with the blockout's - so a
   // counter against the wall stands at the scene's wall, not inside or behind it. Sizes stay.
   const envScale = objects.some((o) => o.file) ? horizontalScale(readSpz(envSpz), renderEquirect(buildScene(envLayout), c.capture, 512, 256), filePose) : null;
-  const shift = envScale !== null && envScale > 0.7 && envScale < 1.4 && Math.abs(envScale - 1) > 0.02 ? envScale : null;
+  const shift = shiftOf(envScale);
   if (shift !== null) p('objects', `The environment is ${Math.round(shift * 100)}% of the blockout's size: moving the objects to match`);
-  const parts = [readSpzGaussians(envSpz)];
-  for (const o of objects) {
-    if (!o.file) continue;
-    const g = readSpzGaussians(new Uint8Array(await readFile(join(dir, o.file))));
-    const src = layout.objects.find((x) => x.id === o.id);
-    if (shift !== null && src) {
-      const rel = [src.position[0] - origin[0], src.position[2] - origin[2]];
-      transformGaussians(g, [[1, 0, 0], [0, 1, 0], [0, 0, 1]], 1, [rel[0]! * (shift - 1), 0, rel[1]! * (shift - 1)]);
-      await writeFile(join(dir, o.file), writeSpzGaussians(g));
-    }
-    parts.push(g);
-  }
-  const finalSpz = parts.length > 1 ? writeSpzGaussians(concatGaussians(parts)) : envSpz;
-  await writeFile(join(dir, 'scene.spz'), finalSpz);
+  const finalSpz = await composeScene(dir, layout, origin, envSpz, objects, shift);
 
   p('verify', 'Checking the scene against the blockout');
   const lowRes = renderEquirect(buildScene(layout), c.capture, 256, 128);

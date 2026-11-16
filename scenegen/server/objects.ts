@@ -157,7 +157,12 @@ export interface Sam3dResult { ply: Uint8Array; seconds: number; requestId: stri
 const SAM3D_URL = 'https://queue.fal.run/fal-ai/sam-3/3d-objects';
 
 /** SAM 3D Objects on fal: a crop and a box in, a Gaussian-splat PLY out (1-4 minutes; queued). */
-export async function sam3d(image: Uint8Array, box: [number, number, number, number], key: string | undefined, opts: { seed?: number; signal?: AbortSignal; f?: typeof fetch } = {}): Promise<Sam3dResult> {
+/**
+ * `maxQueueSeconds`: how long a request may wait in fal's queue before it is cancelled (default
+ * 150); once it runs it gets `maxSeconds` in all (default 300) - cancelling a running request throws
+ * its work away (seen: one cancelled at 150 s while running).
+ */
+export async function sam3d(image: Uint8Array, box: [number, number, number, number], key: string | undefined, opts: { seed?: number; signal?: AbortSignal; f?: typeof fetch; maxQueueSeconds?: number; maxSeconds?: number } = {}): Promise<Sam3dResult> {
   if (!key) throw new Error('FAL_KEY is not set: SAM 3D cannot run.');
   const f = opts.f ?? ((...a) => globalThis.fetch(...a));
   const t0 = Date.now();
@@ -181,6 +186,8 @@ export async function sam3d(image: Uint8Array, box: [number, number, number, num
     export_textured_glb: false,
   });
   const status = String(sub.status_url), resultUrl = String(sub.response_url);
+  const cancelUrl = typeof sub.cancel_url === 'string' ? sub.cancel_url : null;
+  const queueCap = (opts.maxQueueSeconds ?? 150) * 1000, cap = (opts.maxSeconds ?? 300) * 1000;
   for (let misses = 0; ;) {
     opts.signal?.throwIfAborted();
     await new Promise((r) => setTimeout(r, 3000));
@@ -190,7 +197,13 @@ export async function sam3d(image: Uint8Array, box: [number, number, number, num
     misses = 0;
     if (st.status === 'COMPLETED') break;
     if (st.status !== 'IN_QUEUE' && st.status !== 'IN_PROGRESS') throw new Error(`SAM 3D ended ${String(st.status)}`);
-    if (Date.now() - t0 > 12 * 60_000) throw new Error('SAM 3D did not finish within 12 minutes.');
+    const waited = Date.now() - t0;
+    if ((st.status === 'IN_QUEUE' && waited > queueCap) || waited > cap) {
+      // fal's queue time varies from seconds to minutes (seen: 374 s for one object): give up on this
+      // request - cancelled, so it does not run on unseen - and let the caller try again.
+      if (cancelUrl) void f(cancelUrl, { method: 'PUT', headers: H, signal: AbortSignal.timeout(10_000) }).catch(() => {});
+      throw new Error(st.status === 'IN_QUEUE' ? `SAM 3D still queued after ${Math.round(queueCap / 1000)} s` : `SAM 3D did not finish within ${Math.round(cap / 1000)} s`);
+    }
   }
   const res = await call(resultUrl) as { gaussian_splat?: { url: string }; metadata?: unknown[] };
   if (!res.gaussian_splat?.url) throw new Error('SAM 3D found no object in the box.');
@@ -248,12 +261,16 @@ export interface ObjectAsset {
   gaussians: number | null;
   seconds: number | null;
   error: string | null;
+  /** Already moved to the environment's scale (composeScene), so a later compose leaves it be. */
+  shifted?: boolean;
 }
 
 /** Every asset object: crop the object panorama at it, SAM 3D, thin, fit to the blockout, write objects/<id>.spz. */
 export async function generateObjects(layout: Layout, assets: LayoutObject[], panoPath: string, dir: string, deps: {
   sam3d: (image: Uint8Array, box: [number, number, number, number]) => Promise<{ ply: Uint8Array; seconds: number }>;
   /** When the panorama does not show the objects (the environment's): paint each into its own crop, guided by `guidePano` (the full blockout's clay render). */
+  /** Objects whose crop was painted before (retrying a failed SAM 3D): their crop and box, no painting. */
+  reuse?: Map<string, { crop: string; box: [number, number, number, number] }>;
   paint?: { guidePano: string; style?: string; run: (input: { image: Uint8Array; guide: Uint8Array; size: number; box: [number, number, number, number]; label: string; style?: string }) => Promise<Uint8Array> };
   maxGaussians?: number;
   onProgress?: (message: string) => void;
@@ -270,7 +287,10 @@ export async function generateObjects(layout: Layout, assets: LayoutObject[], pa
     const crop = `objects/${o.id}-crop.${deps.paint ? 'png' : 'jpg'}`;
     let base = { id: o.id, label: o.label, crop, box: view.box };
     try {
-      if (deps.paint) {
+      const prev = deps.reuse?.get(o.id);
+      if (prev) {
+        base = { ...base, crop: prev.crop, box: prev.box };
+      } else if (deps.paint) {
         const envCrop = join(dir, `objects/${o.id}-env.jpg`), guideCrop = join(dir, `objects/${o.id}-guide.jpg`);
         await Promise.all([cropPanorama(panoPath, view, capture.yaw, envCrop), cropPanorama(deps.paint.guidePano, view, capture.yaw, guideCrop)]);
         const painted = await deps.paint.run({ image: new Uint8Array(await readFile(envCrop)), guide: new Uint8Array(await readFile(guideCrop)), size: view.size, box: view.box, label: o.label, style: deps.paint.style });
@@ -280,7 +300,7 @@ export async function generateObjects(layout: Layout, assets: LayoutObject[], pa
         base = { ...base, box: paintedBox(before, after, view.size, view.box).box };
       } else await cropPanorama(panoPath, view, capture.yaw, join(dir, crop));
       // One retry: SAM 3D on fal fails now and then on the network, rarely twice.
-      const image = new Uint8Array(await readFile(join(dir, crop)));
+      const image = new Uint8Array(await readFile(join(dir, base.crop)));
       const r = await deps.sam3d(image, base.box).catch((e: Error) => { deps.onProgress?.(`${o.label}: SAM 3D failed (${e.message}), retrying`); return deps.sam3d(image, base.box); });
       // Every Gaussian SAM 3D gives (~0.5M, a few MB as .spz); the cap only guards against a runaway.
       const g = thinGaussians(readPlyGaussians(r.ply), deps.maxGaussians ?? 1_000_000);

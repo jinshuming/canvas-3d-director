@@ -22,6 +22,7 @@ import { join } from 'node:path';
 
 import { basis, c2wToPose, DEG, dirToEquirect, equirectDir, toServiceC2W } from '../core/frame.ts';
 import type { CameraPose, Mat4, Vec3 } from '../core/frame.ts';
+import { scaleSpz } from '../core/gaussians.ts';
 import { distanceToFloor, readSpz } from '../core/spz.ts';
 import type { SpzPoints } from '../core/spz.ts';
 import { readPointsPly } from '../core/spzwrite.ts';
@@ -311,17 +312,17 @@ export async function videoGenerateScene(bundle: string, dir: string, deps: {
   const sessionId = newSessionId('sgvg');
   const filePose: CameraPose = { position: [0, 0, 0], yaw: apose.yaw };
   const height = anchor.pose.position[1];
-  p('scale', 'Measuring how big a JST-2 unit is');
-  const cal = await run(() => deps.jst2.customPano({ sessionId: newSessionId('sgvgcal'), panorama: pano, mime: 'image/png', c2w: toServiceC2W(filePose), metersPerUnit: 1 }));
-  credits += cal.credits ?? 0;
-  const units = distanceToFloor(readSpz(await deps.jst2.download(cal.result!.spz.url)), [0, 0, 0], [0, -1, 0], { radius: 0.08, maxDistance: 10 });
-  if (!units) throw new Error('Could not find the floor under the anchor in the calibration scene.');
-  const metersPerUnit = Math.round((height / units) * 1000) / 1000;
-  lap('scale');
-  p('scene', `Building the scene at the anchor (1 unit = ${metersPerUnit} m)`);
-  const first = await run(() => deps.jst2.customPano({ sessionId, panorama: pano, mime: 'image/png', c2w: toServiceC2W(filePose), metersPerUnit }));
+  // One build at 1 unit = 1, measured on itself (the anchor camera's height above the floor),
+  // scaled into metres here; the session stays in units (poses go out divided by the scale).
+  p('scene', 'Building the scene at the anchor');
+  const first = await run(() => deps.jst2.customPano({ sessionId, panorama: pano, mime: 'image/png', c2w: toServiceC2W(filePose), metersPerUnit: 1 }));
   credits += first.credits ?? 0;
-  await writeFile(join(dir, 'initial.spz'), await deps.jst2.download(first.result!.spz.url));
+  const built = await deps.jst2.download(first.result!.spz.url);
+  const units = distanceToFloor(readSpz(built), [0, 0, 0], [0, -1, 0], { radius: 0.08, maxDistance: 10 });
+  if (!units) throw new Error('Could not find the floor under the anchor in the scene.');
+  const metersPerUnit = Math.round((height / units) * 1000) / 1000;
+  p('scale', `1 unit = ${metersPerUnit} m`);
+  await writeFile(join(dir, 'initial.spz'), scaleSpz(built, metersPerUnit));
   const batchIds = [first.result!.outputBatch!.batchId];
   lap('scene');
 
@@ -334,7 +335,8 @@ export async function videoGenerateScene(bundle: string, dir: string, deps: {
     const pose: CameraPose = { position: rel(c.pose.position), yaw: c.pose.yaw, pitch: c.pose.pitch ?? 0 };
     const fov = Math.round(Math.max(20, Math.min(140, c.hfov)));
     p('path', `View ${i + 1}/${targets.length}: frame ${c.index}, ${pose.position.map((x) => x.toFixed(1)).join(', ')} m, facing ${Math.round(c.pose.yaw)}°`);
-    const g = await run(() => deps.jst2.generate({ sessionId, referenceBatchIds: batchIds, targetC2w: toServiceC2W(pose), projection: 'perspective', fov }));
+    const sent: CameraPose = { ...pose, position: [pose.position[0] / metersPerUnit, pose.position[1] / metersPerUnit, pose.position[2] / metersPerUnit] };
+    const g = await run(() => deps.jst2.generate({ sessionId, referenceBatchIds: batchIds, targetC2w: toServiceC2W(sent), projection: 'perspective', fov }));
     credits += g.credits ?? 0;
     const batch = g.result!.outputBatch!;
     batchIds.push(batch.batchId);
@@ -351,13 +353,13 @@ export async function videoGenerateScene(bundle: string, dir: string, deps: {
     p('rebuild', `Rebuilding from ${batchIds.length} batches`);
     const r = await run(() => deps.jst2.reconstruct({ sessionId, referenceBatchIds: batchIds }));
     credits += r.credits ?? 0;
-    spz = new Uint8Array(await deps.jst2.download(r.result!.spz.url));
+    spz = new Uint8Array(scaleSpz(await deps.jst2.download(r.result!.spz.url), metersPerUnit));
   }
   lap('rebuild');
   let fill: FillResult | null = null;
   if ((deps.maxFills ?? 2) > 0) {
     p('fill', 'Looking for gaps');
-    const f = await autoFill(spz, dir, { jst2: deps.jst2, sessionId, batchIds, capture: [0, 0, 0], maxFills: deps.maxFills ?? 2, signal: deps.signal, onProgress: (m) => p('fill', m) });
+    const f = await autoFill(spz, dir, { jst2: deps.jst2, sessionId, batchIds, capture: [0, 0, 0], maxFills: deps.maxFills ?? 2, unit: metersPerUnit, signal: deps.signal, onProgress: (m) => p('fill', m) });
     fill = f.result; credits += f.result.credits; spz = new Uint8Array(f.spz);
   }
   await writeFile(join(dir, 'scene.spz'), spz);
