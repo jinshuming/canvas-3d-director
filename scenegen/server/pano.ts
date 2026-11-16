@@ -228,8 +228,8 @@ export async function paintObject(cfg: { apiKey?: string; base?: string; model?:
   form.append('prompt', [
     'The first image is a photo of a place. The second is a clay blockout of the SAME view, pixel-aligned: the grey blocks show where things stand and how big they are.',
     `In the transparent area of the mask, ADD: ${input.label}. Exactly where and as big as its block in the clay image, facing the way the block faces, standing on the floor (or on what its block stands on).`,
-    `Photoreal and complete, in the photo's light and perspective${input.style ? `, ${input.style}` : ''}, with a natural contact shadow. Only this one object; keep everything outside the transparent area exactly as it is. No people, no text.`,
-  ].join('\n'));
+    `Photoreal and complete, in the photo's light and perspective${input.style ? `, ${input.style}` : ''}, with a natural contact shadow. Only ADD this one object: everything already in the photo stays, inside the transparent area too (chairs, plants, other furniture - where the object is in front of them it hides them, where they are in front of it they hide it); outside the transparent area nothing changes at all. No people, no text.`,
+  ].filter(Boolean).join('\n'));
   form.append('image[]', new Blob([image as BlobPart], { type: 'image/png' }), 'photo.png');
   form.append('image[]', new Blob([guide as BlobPart], { type: 'image/png' }), 'blockout.png');
   form.append('mask', new Blob([encodePng(rgba, S, S, 4) as BlobPart], { type: 'image/png' }), 'mask.png');

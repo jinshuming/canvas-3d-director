@@ -11,14 +11,14 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { measureAlignment } from '../core/align.ts';
+import { horizontalScale, measureAlignment } from '../core/align.ts';
 import type { Alignment } from '../core/align.ts';
 import { compileCaption } from '../core/caption.ts';
 import { findCapturePoint } from '../core/capture.ts';
 import { toServiceC2W } from '../core/frame.ts';
 import type { CameraPose } from '../core/frame.ts';
 import { buildScene } from '../core/geometry.ts';
-import { concatGaussians, readSpzGaussians, writeSpzGaussians } from '../core/gaussians.ts';
+import { concatGaussians, readSpzGaussians, transformGaussians, writeSpzGaussians } from '../core/gaussians.ts';
 import { depthImage, depthRange, renderEquirect, semanticImage, shadedImage } from '../core/render.ts';
 import { distanceToFloor, readSpz } from '../core/spz.ts';
 import type { Layout } from '../core/types.ts';
@@ -53,6 +53,8 @@ export interface TextSceneResult {
   chosen: number;
   /** Key objects generated as their own assets (SAM 3D), fitted to the blockout; empty when objects are off. */
   objects: ObjectAsset[];
+  /** The environment's horizontal size over the blockout's (walls), which the objects were moved by; null = not measured. */
+  envScale: number | null;
   files: { depth: string; semantic: string; shaded: string; panorama: string; blockoutFull: string | null; environment: string; scene: string; layout: string };
   legend: Array<{ cls: string; color: [number, number, number]; share: number }>;
   seconds: Record<string, number>;
@@ -243,8 +245,25 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
   lap('compose');
   // The composed scene: the environment and every object, one file (the director loads one), in the
   // scene's frame - capture point at the origin, metres, Y up. The viewer loads the parts separately.
+  // The objects were placed by the blockout; the environment may have come out a little smaller or
+  // larger (horizontally). Move each object to the same place IN the environment - its offset from
+  // the capture point scaled by how the environment's walls compare with the blockout's - so a
+  // counter against the wall stands at the scene's wall, not inside or behind it. Sizes stay.
+  const envScale = objects.some((o) => o.file) ? horizontalScale(readSpz(envSpz), renderEquirect(buildScene(envLayout), c.capture, 512, 256), filePose) : null;
+  const shift = envScale !== null && envScale > 0.7 && envScale < 1.4 && Math.abs(envScale - 1) > 0.02 ? envScale : null;
+  if (shift !== null) p('objects', `The environment is ${Math.round(shift * 100)}% of the blockout's size: moving the objects to match`);
   const parts = [readSpzGaussians(envSpz)];
-  for (const o of objects) if (o.file) parts.push(readSpzGaussians(new Uint8Array(await readFile(join(dir, o.file)))));
+  for (const o of objects) {
+    if (!o.file) continue;
+    const g = readSpzGaussians(new Uint8Array(await readFile(join(dir, o.file))));
+    const src = layout.objects.find((x) => x.id === o.id);
+    if (shift !== null && src) {
+      const rel = [src.position[0] - origin[0], src.position[2] - origin[2]];
+      transformGaussians(g, [[1, 0, 0], [0, 1, 0], [0, 0, 1]], 1, [rel[0]! * (shift - 1), 0, rel[1]! * (shift - 1)]);
+      await writeFile(join(dir, o.file), writeSpzGaussians(g));
+    }
+    parts.push(g);
+  }
   const finalSpz = parts.length > 1 ? writeSpzGaussians(concatGaussians(parts)) : envSpz;
   await writeFile(join(dir, 'scene.spz'), finalSpz);
 
@@ -272,6 +291,7 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
     candidates,
     chosen: chosen.index,
     objects,
+    envScale,
     files: { depth: 'depth.png', semantic: 'semantic.png', shaded: 'shaded.png', panorama: panoName, blockoutFull: plan.assets.length ? 'blockout-full/shaded.png' : null, environment: 'environment.spz', scene: 'scene.spz', layout: 'layout.json' },
     legend: c.legend,
     seconds,

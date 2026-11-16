@@ -200,11 +200,15 @@ export function transformGaussians(g: Gaussians, R: Mat3, s: number, t: [number,
   return g;
 }
 
-/** Keep the `max` Gaussians that matter most to the image (opacity × footprint); faint specks go first. */
+/**
+ * Keep the `max` most opaque Gaussians; the faintest go first. NOT by size: a SAM 3D object's
+ * surfaces are its many small opaque Gaussians, and keeping the largest (tried: 570k → 150k) left a
+ * see-through smear where a solid counter should be.
+ */
 export function thinGaussians(g: Gaussians, max: number): Gaussians {
   if (g.count <= max) return g;
   const score = new Float32Array(g.count);
-  for (let i = 0; i < g.count; i++) score[i] = g.alphas[i]! * Math.exp(g.scales[i * 3]! + g.scales[i * 3 + 1]! + g.scales[i * 3 + 2]!) ** (1 / 3);
+  for (let i = 0; i < g.count; i++) score[i] = g.alphas[i]!;
   const idx = Array.from({ length: g.count }, (_, i) => i).sort((a, b) => score[b]! - score[a]!).slice(0, max);
   return pick(g, idx);
 }
