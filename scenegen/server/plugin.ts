@@ -77,6 +77,8 @@ export interface Project {
   result?: unknown;
   job?: Job | null;
   exported?: { sceneId: string; at: string } | null;
+  /** Relighting chosen in the scene editor (the director's StageLighting fields + `scene`); null = the captured light. */
+  lighting?: Record<string, unknown> | null;
 }
 
 class HttpError extends Error { constructor(readonly status: number, message: string) { super(message); } }
@@ -250,6 +252,7 @@ export function scenegenServer(opts: ScenegenOptions): Plugin {
       if (typeof body.title === 'string') proj.title = body.title.slice(0, 80);
       if (body.layout) proj.layout = body.layout as Layout;
       if (Array.isArray(body.chat)) proj.chat = body.chat;
+      if (body.lighting === null || (body.lighting && typeof body.lighting === 'object')) proj.lighting = body.lighting as Record<string, unknown> | null;
       await save(proj);
       return json(res, { ok: true, updatedAt: proj.updatedAt });
     }

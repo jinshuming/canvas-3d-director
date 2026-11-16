@@ -12,10 +12,15 @@ export interface Config {
 }
 export interface Job { id: string; kind: string; status: 'running' | 'done' | 'failed'; stage: string; message: string; progress: number; log: string[]; error?: string; startedAt: number; endedAt?: number }
 export interface ProjectSummary { id: string; kind: 'text' | 'video'; title: string; updatedAt: string; objects: number; status: string; exported: { sceneId: string } | null; thumb: string | null }
+/** The director's StageLighting, plus how far the scene's own captured light is replaced (0-1). */
+export interface SceneLighting { preset?: string; azimuth: number; elevation: number; intensity: number; color: string; ambient: number; shadows: number; relight: number; scene: number }
+
 export interface Project {
   id: string; kind: 'text' | 'video'; title: string; updatedAt: string; layout: Layout; chat: unknown[];
   video?: { file: string; bytes: number } | null; reference?: { file: string; mime: string } | null;
   result?: Record<string, unknown> | null; job?: Job | null; exported?: { sceneId: string; at: string } | null;
+  /** Relighting chosen in the scene editor: the director's StageLighting fields plus `scene` (how far the scene takes the light). */
+  lighting?: SceneLighting | null;
 }
 export interface Conditions { capture: CameraPose; range: { zMin: number; zMax: number }; legend: Array<{ cls: string; color: number[]; share: number }>; prompt: string; issues: Issue[]; files: { depth: string; semantic: string; shaded: string } }
 
@@ -44,7 +49,7 @@ export const api = {
   projects: () => call<ProjectSummary[]>('GET', '/projects'),
   create: (kind: 'text' | 'video', extra: { title?: string; layout?: Layout } = {}) => call<Project>('POST', '/projects', { kind, ...extra }),
   get: (id: string) => call<Project>('GET', `/projects/${id}`),
-  put: (id: string, patch: Partial<Pick<Project, 'title' | 'layout' | 'chat'>>) => call<{ ok: true }>('PUT', `/projects/${id}`, patch),
+  put: (id: string, patch: Partial<Pick<Project, 'title' | 'layout' | 'chat' | 'lighting'>>) => call<{ ok: true }>('PUT', `/projects/${id}`, patch),
   conditions: (id: string) => call<Conditions>('POST', `/projects/${id}/conditions`),
   quickLayout: (id: string, body: { text: string; useVideo?: boolean; useReference?: boolean }) => call<{ layout: Layout; keys: string[]; issuesFixed: number; seconds: { model: number; place: number } }>('POST', `/projects/${id}/quick-layout`, body),
   capture: (id: string) => call<CaptureResult>('POST', `/projects/${id}/capture`),

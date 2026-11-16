@@ -19,12 +19,14 @@ import { api as sg, file, toDataUrl } from '../../scenegen/web/api.ts';
 import type { Project } from '../../scenegen/web/api.ts';
 import { STAGE_LABEL } from '../../scenegen/web/runner.ts';
 import { SplatViewer } from '../../scenegen/web/SplatViewer.tsx';
-import type { ViewerPose } from '../../scenegen/web/SplatViewer.tsx';
+import type { RelightBox, ViewerPose } from '../../scenegen/web/SplatViewer.tsx';
+import type { SceneLighting } from '../../scenegen/web/api.ts';
 import { Viewport } from '../../scenegen/web/Viewport.tsx';
 import { AgentPanel } from '../agent/AgentPanel.tsx';
 import type { ChatItem as PanelItem, TurnStats } from '../agent/useAgent.ts';
 import { Icon } from '../icons.tsx';
 import { linkProps, navigate, worldPath } from '../router.ts';
+import { LightPanel } from './LightPanel.tsx';
 import { appendWorldAfter } from './model.ts';
 import { sendToWorld, STATUS_LABEL, statusOf } from './SceneNodes.tsx';
 import './scene-editor.css';
@@ -170,6 +172,39 @@ function jobToPanel(project: Project): PanelItem[] {
   return [...past.flatMap((j) => oneJob(j, project, false)), ...oneJob(job, project, true)];
 }
 
+const LIGHT_NAME: Record<string, string> = { morning: '清晨', noon: '正午', dusk: '黄昏', night: '夜晚', overcast: '阴天' };
+
+/** The project's lighting, applied live and saved (debounced) with the project. */
+function useLighting(project: Project) {
+  const [lighting, set] = useState<SceneLighting | null>(project.lighting ?? null);
+  const [lightOpen, setLightOpen] = useState(false);
+  const timer = useRef(0);
+  const setLighting = (l: SceneLighting | null) => {
+    set(l);
+    window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => void sg.put(project.id, { lighting: l }).catch(() => {}), 400);
+  };
+  return { lighting, setLighting, lightOpen, setLightOpen };
+}
+
+const viewerLight = (l: SceneLighting) => ({ azimuth: l.azimuth, elevation: l.elevation, intensity: l.intensity, color: l.color, ambient: l.ambient, shadows: l.shadows, scene: l.scene });
+
+/**
+ * Where the environment is relit, in the scene file's frame (capture point at the origin): its room,
+ * a little past the walls, floor to ceiling - a relit area stops at the edge of its box, and at the
+ * walls that edge does not show. Outdoors, the ground around the capture point.
+ */
+export function roomBox(layout: Layout): RelightBox | null {
+  const c = layout.capture?.position;
+  if (!c) return null;
+  if (layout.room) {
+    const { width: w, depth: d, height: h } = layout.room;
+    return { min: [-w / 2 - c[0] - 0.3, -c[1] - 0.3, -d / 2 - c[2] - 0.3], max: [w / 2 - c[0] + 0.3, h - c[1] + 0.3, d / 2 - c[2] + 0.3] };
+  }
+  const s = Math.min(15, layout.ground.size / 2);
+  return { min: [-s - c[0], -c[1] - 0.5, -s - c[2]], max: [s - c[0], 8 - c[1], s - c[2]] };
+}
+
 function GenEditor({ project, reload }: { project: Project; reload: () => Promise<void> }) {
   const [layout, setLayout] = useState<Layout>(project.layout);
   const [chat, setChat] = useState<ChatState>(() => (project.chat[0] as ChatState | undefined) ?? { items: [], previousId: null });
@@ -180,6 +215,7 @@ function GenEditor({ project, reload }: { project: Project; reload: () => Promis
   const [selected, setSelected] = useState<string | null>(null);
   const abort = useRef<AbortController | null>(null);
   const [start, setStart] = useState<ViewerPose | null>(null);
+  const { lighting, setLighting, lightOpen, setLightOpen } = useLighting(project);
   const result = project.result as GenResult | null | undefined;
   const job = project.job;
   const running = job?.status === 'running';
@@ -275,6 +311,7 @@ function GenEditor({ project, reload }: { project: Project; reload: () => Promis
           <button className={view === 'blockout' ? 'on' : ''} onClick={() => setView('blockout')}>白模</button>
           {result?.files?.panorama && <button className={view === 'pano' ? 'on' : ''} onClick={() => setView('pano')}>全景图</button>}
           {result?.files?.panorama && <button className={view === 'refs' ? 'on' : ''} onClick={() => setView('refs')}>参考图</button>}
+          {result?.files?.scene && <button className={`se-light-btn${lightOpen ? ' on' : ''}${lighting ? ' lit' : ''}`} onClick={() => { setView('scene'); setLightOpen((o) => !o); }}><Icon name="sparkle" size={13} />光照{lighting ? ` · ${lighting.preset ? LIGHT_NAME[lighting.preset] ?? '自定义' : '自定义'}` : ''}</button>}
           <span className="se-spacer" />
           <span className="se-muted">{layout.room ? `室内 ${layout.room.width}×${layout.room.depth}×${layout.room.height} m` : layout.objects.length ? '室外' : ''}{layout.objects.length ? ` · ${layout.objects.length} 个物体` : ''}</span>
         </div>
@@ -283,6 +320,7 @@ function GenEditor({ project, reload }: { project: Project; reload: () => Promis
             ? <SplatViewer url={file(project.id, `out/${objects.length && result.files.environment ? result.files.environment : result.files.scene}`, stamp)}
                 objects={result.files.environment ? objects.map((o) => ({ id: o.id, label: o.label, url: file(project.id, `out/${o.file}`, stamp) })) : []} yaw={result.capture?.yaw ?? 0}
                 start={start} expanding={running} expandHint="从当前相机位置生成这个视角并重建环境（约 10 额度）"
+                lighting={lighting ? viewerLight(lighting) : null} relightBox={roomBox(layout)}
                 onExpand={(pose) => { setStart(pose); void sg.expand(project.id, pose).then(() => reload()).catch((e) => setChat((c) => ({ ...c, items: [...c.items, { role: 'assistant', text: `扩展失败：${(e as Error).message}` }] }))); }} />
             : view === 'pano' && result?.files?.panorama ? <img className="se-pano" src={file(project.id, `out/${result.files.panorama}`, stamp)} alt="" />
             : view === 'refs' && result ? <RefGallery project={project} result={result} stamp={stamp} />
@@ -290,6 +328,7 @@ function GenEditor({ project, reload }: { project: Project; reload: () => Promis
             : <div className="se-empty"><Icon name="scene" size={34} /><p>在右侧描述你想要的场景，几秒内摆成白模。</p></div>}
           <Progress project={project} />
           {job?.status === 'failed' && <div className="se-failed">生成失败：{job.error}</div>}
+          {lightOpen && view === 'scene' && <LightPanel lighting={lighting} onChange={setLighting} onClose={() => setLightOpen(false)} />}
         </div>
         {result && !running && <div className="se-strip">
           <span>与白模一致 <b>{Math.round((result.alignment?.within25 ?? 0) * 100)}%</b></span>
@@ -394,6 +433,9 @@ type ReconResult = {
   pathViews?: Array<{ index: number; file: string; image: string | null; position: number[] }>;
 };
 
+/** A reconstruction has no blockout room: relight what lies within 8 m of the capture point. */
+export const RECON_BOX: RelightBox = { min: [-8, -3, -8], max: [8, 5, 8] };
+
 function ReconEditor({ project, reload }: { project: Project; reload: () => Promise<void> }) {
   const r = project.result as ReconResult | null | undefined;
   const job = project.job;
@@ -401,6 +443,7 @@ function ReconEditor({ project, reload }: { project: Project; reload: () => Prom
   const stamp = job?.endedAt ?? 0;
   const [err, setErr] = useState<string | null>(null);
   const [start, setStart] = useState<ViewerPose | null>(null);
+  const { lighting, setLighting, lightOpen, setLightOpen } = useLighting(project);
   const rerun = async () => {
     setErr(null);
     try { await sg.videoRun(project.id, { reusePoses: true }); await reload(); } catch (e) { setErr((e as Error).message); }
@@ -408,13 +451,19 @@ function ReconEditor({ project, reload }: { project: Project; reload: () => Prom
   return (
     <div className="se-body">
       <section className="se-stage">
+        {r && <div className="se-tabs">
+          <button className="on">3D 场景</button>
+          <button className={`se-light-btn${lightOpen ? ' on' : ''}${lighting ? ' lit' : ''}`} onClick={() => setLightOpen((o) => !o)}><Icon name="sparkle" size={13} />光照{lighting ? ` · ${lighting.preset ? LIGHT_NAME[lighting.preset] ?? '自定义' : '自定义'}` : ''}</button>
+        </div>}
         <div className="se-view">
           {r && (!running || start) ? <SplatViewer url={file(project.id, 'out/scene.spz', stamp)} start={start} expanding={running}
+              lighting={lighting ? viewerLight(lighting) : null} relightBox={RECON_BOX}
               onExpand={r.mode === 'generate' ? (pose) => { setStart(pose); setErr(null); void sg.expand(project.id, pose).then(() => reload()).catch((e) => setErr((e as Error).message)); } : undefined} />
             : project.video ? <video className="se-video" src={file(project.id, project.video.file)} muted controls />
             : <div className="se-empty"><Icon name="video" size={34} /><p>先在画布节点上传一段视频。</p></div>}
           <Progress project={project} />
           {job?.status === 'failed' && <div className="se-failed">重建失败：{job.error}</div>}
+          {lightOpen && r && <LightPanel lighting={lighting} onChange={setLighting} onClose={() => setLightOpen(false)} />}
         </div>
       </section>
       <aside className="se-chat se-panel">
