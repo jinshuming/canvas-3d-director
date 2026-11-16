@@ -43,6 +43,7 @@ import { videoToSceneByGenerate } from './videoGen.ts';
 import { falFluxDepthProvider, jst2ReferenceProvider, openaiImageProvider, paintObject, peopleCheck } from './pano.ts';
 import { buildLayout, requestSpec } from './quickLayout.ts';
 import type { PanoProvider } from './pano.ts';
+import { expandScene } from './expand.ts';
 import { renderConditions, retryObjects, textToScene } from './textScene.ts';
 import { extractKeyframes, readKeyframe } from './keyframes.ts';
 import { videoPipelineAvailable, videoToScene } from './videoScene.ts';
@@ -355,11 +356,25 @@ export function scenegenServer(opts: ScenegenOptions): Plugin {
       await save(proj);
       return json(res, proj.video);
     }
+    if (action === '/expand' && m === 'POST') {
+      // Expand a finished scene from the viewer's camera: generate that view, rebuild, recompose.
+      const body = await readJson(req);
+      const pos = body.position;
+      if (!Array.isArray(pos) || pos.length !== 3 || !pos.every((v: unknown) => typeof v === 'number' && Number.isFinite(v))) throw new HttpError(400, 'position must be [x, y, z] in metres.');
+      if (!proj.result || proj.job?.status === 'running') throw new HttpError(409, 'Expand a scene once it is generated.');
+      const prev = proj.job ? { kind: proj.job.kind, log: proj.job.log, startedAt: proj.job.startedAt, endedAt: proj.job.endedAt, status: proj.job.status } : null;
+      const job = startJob(proj, proj.kind === 'video' ? 'video' : 'text', (j, signal) => expandScene(join(pdir(proj.id), 'out'), proj.kind === 'video' ? 'video' : 'text',
+        { position: pos as [number, number, number], yaw: Number(body.yaw) || 0, pitch: Number(body.pitch) || 0 },
+        { jst2, fov: body.fov ? Number(body.fov) : undefined, previousJob: prev, signal, onProgress: (stage, message) => note(j, stage, message, { expand: 0.2, rebuild: 0.6, compose: 0.9, done: 1 }[stage] ?? 0.5) }));
+      return json(res, job, 202);
+    }
     if (action === '/retry-objects' && m === 'POST') {
       // SAM 3D again for the objects that failed, from their painted crops; the scene is recomposed.
       if (!opts.falKey) throw new HttpError(503, 'FAL_KEY is not set: SAM 3D cannot run.');
       if (!(proj.result as { objects?: Array<{ file: string | null }> } | null)?.objects?.some((o) => !o.file)) throw new HttpError(400, 'No failed objects to retry.');
+      const prev = proj.job ? { kind: proj.job.kind, log: proj.job.log, startedAt: proj.job.startedAt, endedAt: proj.job.endedAt, status: proj.job.status } : null;
       const job = startJob(proj, 'text', (j) => retryObjects(join(pdir(proj.id), 'out'), {
+        previousJob: prev,
         sam3d: (image: Uint8Array, box: [number, number, number, number]) => sam3d(image, box, opts.falKey),
         onProgress: (stage, message) => note(j, stage, message, stage === 'done' ? 1 : 0.5),
       }));

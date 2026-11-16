@@ -25,6 +25,7 @@ import type { Layout } from '../core/types.ts';
 import { EYE_HEIGHT } from '../core/types.ts';
 import { scorePanoramas } from './alignScore.ts';
 import { autoFill, fillBudget } from './fill.ts';
+import type { PastJob } from './expand.ts';
 import { environmentLayout, generateObjects, planObjects } from './objects.ts';
 import type { ObjectAsset } from './objects.ts';
 import type { FillResult } from './fill.ts';
@@ -38,6 +39,10 @@ export interface TextSceneResult {
   provider: string;
   depthRange: { zMin: number; zMax: number };
   metersPerUnit: number;
+  /** The JST-2 session is at 1 unit = 1 (poses go to it divided by metersPerUnit). */
+  sessionInUnits?: boolean;
+  /** Earlier jobs on this project (a generation before an expansion or a retry), for the log. */
+  pastJobs?: PastJob[];
   scaleSource: 'provider-reconstruction' | 'calibration';
   sessionId: string;
   batchIds: string[];
@@ -132,7 +137,7 @@ export async function composeScene(dir: string, layout: Layout, origin: [number,
  * from the crops already painted; then the scene is composed again. The environment was painted
  * without them, so this is how they get back into the scene.
  */
-export async function retryObjects(dir: string, deps: { sam3d: (image: Uint8Array, box: [number, number, number, number]) => Promise<{ ply: Uint8Array; seconds: number }>; onProgress?: Progress }): Promise<TextSceneResult> {
+export async function retryObjects(dir: string, deps: { sam3d: (image: Uint8Array, box: [number, number, number, number]) => Promise<{ ply: Uint8Array; seconds: number }>; onProgress?: Progress; /** The job this one replaces, kept in the result so the log stays whole. */ previousJob?: PastJob | null }): Promise<TextSceneResult> {
   const p = deps.onProgress ?? (() => {});
   const result = JSON.parse(await readFile(join(dir, 'result.json'), 'utf8')) as TextSceneResult;
   const layout = JSON.parse(await readFile(join(dir, 'layout.json'), 'utf8')) as Layout;
@@ -154,7 +159,7 @@ export async function retryObjects(dir: string, deps: { sam3d: (image: Uint8Arra
   p('compose', 'Composing the scene again');
   const finalSpz = await composeScene(dir, layout, capture.position, envSpz, objects, shiftOf(envScale));
   const measured = measureAlignment(readSpz(finalSpz), renderEquirect(buildScene(layout), capture, 256, 128), { position: [0, 0, 0], yaw: capture.yaw });
-  const out: TextSceneResult = { ...result, objects, envScale, alignment: { ...measured, floorY: measured.floorY === null ? null : Math.round((measured.floorY + capture.position[1]) * 100) / 100 } };
+  const out: TextSceneResult = { ...result, pastJobs: [...(result.pastJobs ?? []), ...(deps.previousJob ? [deps.previousJob] : [])], objects, envScale, alignment: { ...measured, floorY: measured.floorY === null ? null : Math.round((measured.floorY + capture.position[1]) * 100) / 100 } };
   await writeFile(join(dir, 'result.json'), JSON.stringify(out, null, 2));
   const ok = redone.filter((o) => o.file).length;
   p('done', `${ok} of ${redone.length} object(s) now in the scene`);
@@ -323,6 +328,7 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
     provider: deps.provider.id,
     depthRange: c.range,
     metersPerUnit,
+    sessionInUnits: true,
     scaleSource,
     sessionId,
     batchIds,

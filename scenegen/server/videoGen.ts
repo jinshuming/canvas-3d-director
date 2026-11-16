@@ -255,6 +255,7 @@ export interface VideoGenResult {
   sessionId: string;
   anchor: { index: number; file: string; frames: number; coverage: number; position: Vec3; yaw: number };
   metersPerUnit: number;
+  sessionInUnits?: boolean;
   pathViews: Array<{ index: number; file: string; position: Vec3; yaw: number; pitch: number; fov: number; batchId: string; image: string | null }>;
   batchIds: string[];
   fill: FillResult | null;
@@ -380,7 +381,7 @@ export async function videoGenerateScene(bundle: string, dir: string, deps: {
   const result: VideoGenResult = {
     sessionId,
     anchor: { index: anchor.index, file: anchor.file, frames: near.length, coverage, position: anchor.pose.position, yaw: anchor.pose.yaw },
-    metersPerUnit, pathViews: views, batchIds, fill, verify, credits,
+    metersPerUnit, sessionInUnits: true, pathViews: views, batchIds, fill, verify, credits,
     files: { stitched: 'anchor-stitched.png', panorama: 'panorama.png', initial: 'initial.spz', scene: 'scene.spz' },
     seconds,
   };

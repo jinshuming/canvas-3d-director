@@ -19,6 +19,7 @@ import { api as sg, file, toDataUrl } from '../../scenegen/web/api.ts';
 import type { Project } from '../../scenegen/web/api.ts';
 import { STAGE_LABEL } from '../../scenegen/web/runner.ts';
 import { SplatViewer } from '../../scenegen/web/SplatViewer.tsx';
+import type { ViewerPose } from '../../scenegen/web/SplatViewer.tsx';
 import { Viewport } from '../../scenegen/web/Viewport.tsx';
 import { AgentPanel } from '../agent/AgentPanel.tsx';
 import type { ChatItem as PanelItem, TurnStats } from '../agent/useAgent.ts';
@@ -138,23 +139,33 @@ function canvasHistory(project: Project): PanelItem[] {
   return out;
 }
 
-/** The latest generation, step by step from its job log, and how it ended. */
-function jobToPanel(project: Project): PanelItem[] {
-  const job = project.job;
-  if (!job || job.kind !== 'text') return [];
+type LoggedJob = { kind: string; log: string[]; status: string; error?: string };
+
+/** One job's steps from its log, and how it ended: a generation's summary, an expansion's, or the error. */
+function oneJob(job: LoggedJob, project: Project, latest: boolean): PanelItem[] {
   const out: PanelItem[] = job.log.map((line, i): PanelItem => {
     const m = /^\[(\d+)s\] (\w+): (.*)$/.exec(line);
     const stage = m?.[2] ?? 'start';
     const last = i === job.log.length - 1;
-    return { kind: 'tool', id: nid(), name: stage, args: JSON.stringify({ message: m?.[3] ?? line }), status: last && job.status === 'running' ? 'running' : 'done', result: `${m ? `${m[1]} 秒 · ` : ''}${m?.[3] ?? line}` };
+    return { kind: 'tool', id: nid(), name: stage, args: JSON.stringify({ message: m?.[3] ?? line }), status: latest && last && job.status === 'running' ? 'running' : 'done', result: `${m ? `${m[1]} 秒 · ` : ''}${m?.[3] ?? line}` };
   });
+  const expand = job.log.some((l) => / expand: /.test(l));
   const r = project.result as GenResult | null | undefined;
-  if (job.status === 'done' && r) {
+  if (job.status === 'done' && expand) out.push({ kind: 'assistant', id: nid(), text: `已从你选的视角扩展场景：${job.log.find((l) => / done: /.test(l))?.replace(/^\[\d+s\] done: /, '') ?? '完成'}。` });
+  else if (job.status === 'done' && r && latest) {
     const objs = (r.objects ?? []).filter((o) => o.file);
-    out.push({ kind: 'assistant', id: nid(), text: `场景生成好了：与白模 **${Math.round((r.alignment?.within25 ?? 0) * 100)}%** 一致，${objs.length ? `${objs.length} 个关键物体由 SAM 3D 单独生成（${objs.map((o) => o.label).join('、')}），` : ''}用了 ${r.credits} 额度、${Math.round(Object.values(r.seconds ?? {}).reduce((a, b) => a + b, 0))} 秒。可以在左边看 3D 场景，或继续说要改什么。` });
-  }
-  if (job.status === 'failed') out.push({ kind: 'error', id: nid(), text: `生成失败：${job.error ?? '未知错误'}` });
+    out.push({ kind: 'assistant', id: nid(), text: `场景生成好了：与白模 **${Math.round((r.alignment?.within25 ?? 0) * 100)}%** 一致，${objs.length ? `${objs.length} 个关键物体由 SAM 3D 单独生成（${objs.map((o) => o.label).join('、')}），` : ''}用了 ${r.credits} 额度。可以在左边看 3D 场景；走到有缺口的地方点右下角 Expand 补全；或继续说要改什么。` });
+  } else if (job.status === 'done') out.push({ kind: 'assistant', id: nid(), text: '场景生成好了。' });
+  if (job.status === 'failed') out.push({ kind: 'error', id: nid(), text: `${expand ? '扩展' : '生成'}失败：${job.error ?? job.log[job.log.length - 1] ?? '未知错误'}` });
   return out;
+}
+
+/** Every run on this project that left a log - earlier ones kept in the result - then the latest. */
+function jobToPanel(project: Project): PanelItem[] {
+  const job = project.job;
+  if (!job || job.kind !== 'text') return [];
+  const past = ((project.result as { pastJobs?: LoggedJob[] } | null | undefined)?.pastJobs ?? []).filter((j) => j.kind === 'text');
+  return [...past.flatMap((j) => oneJob(j, project, false)), ...oneJob(job, project, true)];
 }
 
 function GenEditor({ project, reload }: { project: Project; reload: () => Promise<void> }) {
@@ -166,6 +177,7 @@ function GenEditor({ project, reload }: { project: Project; reload: () => Promis
   const [model, setModel] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const abort = useRef<AbortController | null>(null);
+  const [start, setStart] = useState<ViewerPose | null>(null);
   const result = project.result as GenResult | null | undefined;
   const job = project.job;
   const running = job?.status === 'running';
@@ -266,7 +278,9 @@ function GenEditor({ project, reload }: { project: Project; reload: () => Promis
         <div className="se-view">
           {view === 'scene' && result?.files?.scene
             ? <SplatViewer url={file(project.id, `out/${objects.length && result.files.environment ? result.files.environment : result.files.scene}`, stamp)}
-                objects={result.files.environment ? objects.map((o) => ({ id: o.id, label: o.label, url: file(project.id, `out/${o.file}`, stamp) })) : []} yaw={result.capture?.yaw ?? 0} />
+                objects={result.files.environment ? objects.map((o) => ({ id: o.id, label: o.label, url: file(project.id, `out/${o.file}`, stamp) })) : []} yaw={result.capture?.yaw ?? 0}
+                start={start} expanding={running} expandHint="从当前相机位置生成这个视角并重建环境（约 10 额度）"
+                onExpand={(pose) => { setStart(pose); void sg.expand(project.id, pose).then(() => reload()).catch((e) => setChat((c) => ({ ...c, items: [...c.items, { role: 'assistant', text: `扩展失败：${(e as Error).message}` }] }))); }} />
             : view === 'pano' && result?.files?.panorama ? <img className="se-pano" src={file(project.id, `out/${result.files.panorama}`, stamp)} alt="" />
             : layout.objects.length ? <Viewport layout={layout} capture={layout.capture} selected={selected} onSelect={setSelected} background="#17181b" />
             : <div className="se-empty"><Icon name="scene" size={34} /><p>在右侧描述你想要的场景，几秒内摆成白模。</p></div>}
@@ -314,6 +328,7 @@ function ReconEditor({ project, reload }: { project: Project; reload: () => Prom
   const running = job?.status === 'running';
   const stamp = job?.endedAt ?? 0;
   const [err, setErr] = useState<string | null>(null);
+  const [start, setStart] = useState<ViewerPose | null>(null);
   const rerun = async () => {
     setErr(null);
     try { await sg.videoRun(project.id, { reusePoses: true }); await reload(); } catch (e) { setErr((e as Error).message); }
@@ -322,7 +337,8 @@ function ReconEditor({ project, reload }: { project: Project; reload: () => Prom
     <div className="se-body">
       <section className="se-stage">
         <div className="se-view">
-          {r && !running ? <SplatViewer url={file(project.id, 'out/scene.spz', stamp)} />
+          {r && (!running || start) ? <SplatViewer url={file(project.id, 'out/scene.spz', stamp)} start={start} expanding={running}
+              onExpand={r.mode === 'generate' ? (pose) => { setStart(pose); setErr(null); void sg.expand(project.id, pose).then(() => reload()).catch((e) => setErr((e as Error).message)); } : undefined} />
             : project.video ? <video className="se-video" src={file(project.id, project.video.file)} muted controls />
             : <div className="se-empty"><Icon name="video" size={34} /><p>先在画布节点上传一段视频。</p></div>}
           <Progress project={project} />

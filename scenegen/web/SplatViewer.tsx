@@ -13,8 +13,18 @@ import { Environment, FlyControls, Scene } from '@viggle/splat-engine';
 import { forwardOf } from '../core/frame.ts';
 
 export interface SplatLayer { id: string; label: string; url: string }
+/** A camera in the scene file's frame: metres, our yaw (0 north / -Z, 90 east), pitch up positive. */
+export interface ViewerPose { position: [number, number, number]; yaw: number; pitch: number }
 
-export function SplatViewer({ url, objects = [], yaw = 0, upAxisFlip = false }: { url: string; objects?: SplatLayer[]; yaw?: number; upAxisFlip?: boolean }) {
+export function SplatViewer({ url, objects = [], yaw = 0, upAxisFlip = false, start, onExpand, expanding = false, expandHint }: {
+  url: string; objects?: SplatLayer[]; yaw?: number; upAxisFlip?: boolean;
+  /** Open at this camera instead of the capture point (e.g. where the user was before a rebuild). */
+  start?: ViewerPose | null;
+  /** Show an Expand button: the scene is expanded from the camera's current pose. */
+  onExpand?: (pose: ViewerPose) => void;
+  expanding?: boolean;
+  expandHint?: string;
+}) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading');
   const [error, setError] = useState('');
@@ -25,6 +35,7 @@ export function SplatViewer({ url, objects = [], yaw = 0, upAxisFlip = false }: 
   const [layerState, setLayerState] = useState<Record<string, 'loading' | 'ready' | 'failed'>>({});
   const [attempt, setAttempt] = useState(0);
   const layers = useRef(new Map<string, Environment>());
+  const cam = useRef<{ scene: Scene; fly: FlyControls } | null>(null);
   const key = [url, ...objects.map((o) => o.url)].join('|');
 
   useEffect(() => {
@@ -36,22 +47,24 @@ export function SplatViewer({ url, objects = [], yaw = 0, upAxisFlip = false }: 
     setState('loading');
     void (async () => {
       try {
-        const f = forwardOf(yaw, -5);
+        const y0 = start?.yaw ?? yaw, p0 = start?.pitch ?? -5, c0 = start?.position ?? [0, 0, 0];
+        const f = forwardOf(y0, p0);
         scene = await Scene.create(canvas.current!, {
           bgColor: { r: 0.06, g: 0.07, b: 0.08, a: 1 },
           fov: 60, near: 0.03, far: 500,
-          cameraPosition: { x: 0, y: 0, z: 0 },
-          cameraTarget: { x: f[0] * 3, y: f[1] * 3, z: f[2] * 3 },
+          cameraPosition: { x: c0[0], y: c0[1], z: c0[2] },
+          cameraTarget: { x: c0[0] + f[0] * 3, y: c0[1] + f[1] * 3, z: c0[2] + f[2] * 3 },
         });
         if (dead) { scene.destroy(); return; }
         // FlyControls sets the camera's heading itself on attach (its yaw turns left, ours right), and
         // moves it for held keys only in update(dt): without the per-frame tick WASD / QE do nothing
         // (dragging still looks around - that is applied straight from the pointer events).
-        fly = new FlyControls({ flySpeed: 1.5, yaw: -yaw, pitch: -5 });
+        fly = new FlyControls({ flySpeed: 1.5, yaw: -y0, pitch: p0 });
         fly.attach({ canvas: canvas.current!, cameraEntity: scene.cameraEntity });
         const f2 = fly;
         tick = (dt: number) => f2.update(dt);
         scene.app.on('update', tick);
+        cam.current = { scene, fly };
         scene.start();
         // The video mock's preview is written the same way JST-2 writes files (Y up), so no flip either way by default.
         const opts = (name: string) => ({ rotation: { x: upAxisFlip ? 180 : 0, y: 0, z: 0 }, position: { x: 0, y: 0, z: 0 }, scale: 1, filename: `${name}.spz`, name });
@@ -82,7 +95,7 @@ export function SplatViewer({ url, objects = [], yaw = 0, upAxisFlip = false }: 
         if (!dead) { setError((e as Error).message); setState('error'); }
       }
     })();
-    return () => { dead = true; if (tick) scene?.app.off('update', tick); fly?.detach(); for (const e of loaded.values()) e.destroy(); loaded.clear(); scene?.destroy(); };
+    return () => { dead = true; cam.current = null; if (tick) scene?.app.off('update', tick); fly?.detach(); for (const e of loaded.values()) e.destroy(); loaded.clear(); scene?.destroy(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, yaw, upAxisFlip, attempt]);
 
@@ -101,7 +114,17 @@ export function SplatViewer({ url, objects = [], yaw = 0, upAxisFlip = false }: 
         {objects.map((o) => <label key={o.id} title={o.label} className={layerState[o.id] ?? ''}><input type="checkbox" checked={!hidden.has(o.id)} disabled={layerState[o.id] !== 'ready'} onChange={() => toggle(o.id)} />{o.id}{layerState[o.id] === 'loading' ? ' …' : layerState[o.id] === 'failed' ? ' ✕' : ''}</label>)}
         {objects.some((o) => layerState[o.id] === 'failed') && <button onClick={() => setAttempt((n) => n + 1)}>重试</button>}
       </div>}
-      <div className="hint">拖动看四周 · WASD 移动 · QE 上下 · 起点就是全景的拍摄点</div>
+      <div className="hint">拖动看四周 · WASD 移动 · QE 上下 · 起点就是全景的拍摄点{onExpand ? ' · 走到有缺口的地方点 Expand' : ''}</div>
+      {onExpand && <button className="expand-btn" disabled={expanding || state !== 'ready'} title={expandHint ?? '从当前相机位置生成这个视角，并重建场景'}
+        onClick={() => {
+          const c = cam.current;
+          if (!c) return;
+          const e = c.scene.cameraEntity;
+          const p = e.getPosition(), f = e.forward;
+          // From where the camera actually looks (its -Z), in our convention: yaw 0 north (-Z), 90 east.
+          const yawDeg = (Math.atan2(f.x, -f.z) * 180) / Math.PI;
+          onExpand({ position: [p.x, p.y, p.z], yaw: ((yawDeg % 360) + 360) % 360, pitch: (Math.asin(Math.max(-1, Math.min(1, f.y))) * 180) / Math.PI });
+        }}>{expanding ? '扩展中…' : 'Expand'}</button>}
     </div>
   );
 }
