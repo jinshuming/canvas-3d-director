@@ -198,6 +198,29 @@ export function scenegenServer(opts: ScenegenOptions): Plugin {
       const ai = opts.openai;
       return relayResponses(req, res, ai && { apiKey: ai.apiKey, base: ai.base, model: ai.model, instructions: SCENEGEN_INSTRUCTIONS }, await readJson(req) as unknown as TurnBody);
     }
+    if (p === '/examples' && m === 'GET') {
+      // Finished scenes to show on a new canvas, one per feature: the list in scenegen/examples.json
+      // when there is one (curated), else picked from the projects by the input they were made from.
+      await mkdir(projectsDir, { recursive: true });
+      const ids = (await readdir(projectsDir, { withFileTypes: true })).filter((d) => d.isDirectory()).map((d) => d.name);
+      const all = (await Promise.all(ids.map((id) => load(id).catch(() => null)))).filter((x): x is Project => Boolean(x))
+        .filter((x) => x.job?.status === 'done' && x.result)
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+      const byId = new Map(all.map((x) => [x.id, x]));
+      type Example = { feature: string; kind: 'scenegen' | 'scenerecon'; projectId: string };
+      let picked: Example[] = [];
+      try { picked = (JSON.parse(await readFile(join(root, 'examples.json'), 'utf8')) as Example[]).filter((e) => byId.has(e.projectId)); } catch { /* none curated */ }
+      if (!picked.length) {
+        const keyframes = (x: Project) => existsSync(join(pdir(x.id), 'layout-video'));
+        const objects = (x: Project) => ((x.result as { objects?: Array<{ file: string | null }> }).objects ?? []).some((o) => o.file);
+        const pick = (feature: string, kind: Example['kind'], ok: (x: Project) => boolean) => { const x = all.find(ok); if (x) picked.push({ feature, kind, projectId: x.id }); };
+        pick('文本', 'scenegen', (x) => x.kind === 'text' && !x.reference && !keyframes(x) && objects(x));
+        pick('图片', 'scenegen', (x) => x.kind === 'text' && Boolean(x.reference) && !keyframes(x));
+        pick('视频 + 图片', 'scenegen', (x) => x.kind === 'text' && keyframes(x));
+        pick('视频', 'scenerecon', (x) => x.kind === 'video' && (x.result as { mode?: string }).mode === 'generate');
+      }
+      return json(res, picked.map((e) => ({ ...e, title: byId.get(e.projectId)!.title })));
+    }
     if (p === '/projects' && m === 'GET') {
       await mkdir(projectsDir, { recursive: true });
       const ids = (await readdir(projectsDir, { withFileTypes: true })).filter((d) => d.isDirectory()).map((d) => d.name);
@@ -248,14 +271,15 @@ export function scenegenServer(opts: ScenegenOptions): Plugin {
     if (action === '/quick-layout' && m === 'POST') {
       const body = await readJson(req);
       const text = String(body.text ?? '').trim();
+      // Text, a walkthrough video's keyframes and a picture, in any combination.
       const images: string[] = [];
       const kdir = join(pdir(proj.id), 'layout-video');
       const frames = existsSync(kdir) ? (await readdir(kdir)).filter((f) => /^keyframe-\d+\.jpg$/.test(f)).sort() : [];
       if (body.useVideo !== false && frames.length) for (const f of frames) images.push(`data:image/jpeg;base64,${(await readFile(join(kdir, f))).toString('base64')}`);
-      else if (proj.reference && body.useReference !== false) images.push(`data:${proj.reference.mime};base64,${(await readFile(join(pdir(proj.id), proj.reference.file))).toString('base64')}`);
-      if (!text && !images.length) throw new HttpError(400, 'Give a description, a picture or a video.');
+      const picture = proj.reference && body.useReference !== false ? `data:${proj.reference.mime};base64,${(await readFile(join(pdir(proj.id), proj.reference.file))).toString('base64')}` : undefined;
+      if (!text && !images.length && !picture) throw new HttpError(400, 'Give a description, a picture or a video.');
       const t0 = Date.now();
-      const spec = await requestSpec({ text, images }, { apiKey: opts.openai?.apiKey, base: opts.openai?.base, model: opts.openai?.model ?? 'gpt-6-luna' });
+      const spec = await requestSpec({ text, images, picture }, { apiKey: opts.openai?.apiKey, base: opts.openai?.base, model: opts.openai?.model ?? 'gpt-6-luna' });
       const t1 = Date.now();
       const built = buildLayout(spec, text);
       proj.layout = built.layout;

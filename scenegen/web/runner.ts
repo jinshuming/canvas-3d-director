@@ -10,7 +10,7 @@ import type { Job, Project } from './api.ts';
 export type RunPhase = 'idle' | 'uploading' | 'agent' | 'generating' | 'done' | 'failed';
 export interface RunStatus { phase: RunPhase; message: string; progress: number }
 
-export interface SceneInputs { text: string; image?: Blob | null; video?: Blob | null }
+export interface SceneInputs { text: string; image?: Blob | null; video?: Blob | null; /** Key objects as SAM 3D assets. Default on. */ objects?: boolean }
 
 /**
  * Text / picture / video → the fast blockout (one structured model call, deterministic placement)
@@ -18,18 +18,20 @@ export interface SceneInputs { text: string; image?: Blob | null; video?: Blob |
  * by side, composed by the blockout.
  */
 export async function generateScene(projectId: string, inputs: SceneInputs, onStatus: (s: RunStatus) => void): Promise<Job> {
+  // Any combination of text, a picture and a video.
   if (inputs.video) {
     onStatus({ phase: 'uploading', message: '上传视频，抽取关键帧', progress: 0.02 });
     await api.layoutVideo(projectId, inputs.video);
-  } else if (inputs.image) {
-    onStatus({ phase: 'uploading', message: '上传图片', progress: 0.02 });
+  }
+  if (inputs.image) {
+    onStatus({ phase: 'uploading', message: '上传图片', progress: 0.03 });
     await api.reference(projectId, inputs.image);
   }
   onStatus({ phase: 'agent', message: '理解输入，摆放白模', progress: 0.05 });
   const q = await api.quickLayout(projectId, { text: inputs.text, useVideo: Boolean(inputs.video), useReference: Boolean(inputs.image) });
   if (!q.layout.objects.length) throw new Error('没有摆出任何物体，换个说法再试一次。');
   onStatus({ phase: 'generating', message: `白模：${q.layout.objects.length} 个物体（${q.keys.length} 个关键物体），${(q.seconds.model + q.seconds.place).toFixed(0)} 秒`, progress: 0.08 });
-  return api.generate(projectId, {});
+  return api.generate(projectId, inputs.objects === false ? { objects: false } : {});
 }
 
 /** Video → poses (COLMAP) → scene (the server picks the route: generate today, posed-images later). */
