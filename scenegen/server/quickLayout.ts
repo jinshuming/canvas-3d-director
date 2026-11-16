@@ -72,9 +72,15 @@ ${catalogSummary()}`;
 export interface QuickLayoutResult { layout: Layout; keys: string[]; seconds: number; model: string; issuesFixed: number }
 
 /** Ask the model for the spec (Responses API, strict JSON schema). */
-export async function requestSpec(input: { text: string; images: string[] }, ai: { apiKey?: string; base?: string; model: string }, f: typeof fetch = (...a) => globalThis.fetch(...a)): Promise<LayoutSpec> {
+/** `images`: one picture, or a walkthrough video's frames; `picture`: a picture added beside the frames. */
+export async function requestSpec(input: { text: string; images: string[]; picture?: string }, ai: { apiKey?: string; base?: string; model: string }, f: typeof fetch = (...a) => globalThis.fetch(...a)): Promise<LayoutSpec> {
   if (!ai.apiKey) throw Object.assign(new Error('OPENAI_API_KEY is not set on the server.'), { status: 503 });
-  const lead = input.images.length > 1 ? `The ${input.images.length} pictures are frames of one walkthrough video of the place, in time order: merge them into one layout.` : input.images.length ? 'The picture is the place to build.' : '';
+  const frames = input.images.length > 1 || (input.images.length === 1 && input.picture);
+  const lead = [
+    frames ? `The first ${input.images.length} pictures are frames of one walkthrough video of the place, in time order: merge them into one layout.` : input.images.length ? 'The picture is the place to build.' : '',
+    input.picture && input.images.length ? 'The last picture is a reference the user added: follow it for the look of the place and for anything it shows that the video does not.' : input.picture ? 'The picture is the place to build.' : '',
+  ].filter(Boolean).join(' ');
+  const pictures = input.picture ? [...input.images, input.picture] : input.images;
   const res = await f(`${ai.base ?? 'https://api.openai.com/v1'}/responses`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${ai.apiKey}`, 'Content-Type': 'application/json' },
@@ -83,7 +89,7 @@ export async function requestSpec(input: { text: string; images: string[] }, ai:
       instructions: QUICK_INSTRUCTIONS,
       reasoning: { effort: 'low' },
       store: false,
-      input: [{ role: 'user', content: [{ type: 'input_text', text: [input.text.trim() || 'Build this place.', lead].filter(Boolean).join('\n\n') }, ...input.images.map((u) => ({ type: 'input_image', image_url: u }))] }],
+      input: [{ role: 'user', content: [{ type: 'input_text', text: [input.text.trim() || 'Build this place.', lead].filter(Boolean).join('\n\n') }, ...pictures.map((u) => ({ type: 'input_image', image_url: u }))] }],
       text: { format: { type: 'json_schema', name: 'layout', schema: LAYOUT_SCHEMA, strict: true } },
     }),
   });

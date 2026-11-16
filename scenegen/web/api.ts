@@ -39,6 +39,8 @@ async function call<T>(method: string, path: string, body?: unknown, raw?: { bod
 
 export const api = {
   config: () => call<Config>('GET', '/config'),
+  /** Finished scenes for a new canvas, one per feature. */
+  examples: () => call<Array<{ feature: string; kind: 'scenegen' | 'scenerecon'; projectId: string; title: string }>>('GET', '/examples'),
   projects: () => call<ProjectSummary[]>('GET', '/projects'),
   create: (kind: 'text' | 'video', extra: { title?: string; layout?: Layout } = {}) => call<Project>('POST', '/projects', { kind, ...extra }),
   get: (id: string) => call<Project>('GET', `/projects/${id}`),

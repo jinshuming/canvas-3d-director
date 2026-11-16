@@ -8,7 +8,9 @@ import { navigate, worldPath } from '../router.ts';
 import './canvas.css';
 import { api as sg } from '../../scenegen/web/api.ts';
 import type { NodeInputs } from './SceneNodes.tsx';
+import { SceneComposer } from './SceneComposer.tsx';
 import { SceneGenCard, SceneReconCard } from './SceneNodes.tsx';
+import { useDraft } from './sceneDrafts.ts';
 import type { CanvasNode, CanvasState, NodeKind } from './model.ts';
 import { loadCanvas, newId, NODE_LABEL, NODE_SIZE, saveCanvas } from './model.ts';
 
@@ -58,6 +60,23 @@ export function CanvasPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once, on the seed
   }, []);
 
+  // Finished examples, one per feature, added once to every canvas (below what is already there).
+  useEffect(() => {
+    if (stateRef.current.examples) return;
+    void sg.examples().then((list) => setState((s) => {
+      if (s.examples) return s;
+      const have = new Set(s.nodes.map((n) => n.projectId).filter(Boolean));
+      const add = list.filter((e) => !have.has(e.projectId));
+      const top = s.nodes.length ? Math.max(...s.nodes.map((n) => n.y + n.h)) + 140 : 120;
+      const left = s.nodes.length ? Math.min(...s.nodes.map((n) => n.x)) : 120;
+      const nodes = add.map((e, i): CanvasNode => {
+        const [w, h] = NODE_SIZE[e.kind];
+        return { id: newId(), kind: e.kind, x: left + i * (w + 90), y: top, w, h, projectId: e.projectId, title: e.title, example: e.feature };
+      });
+      return { ...s, nodes: [...s.nodes, ...nodes], examples: 1 };
+    })).catch(() => {});
+  }, []);
+
   const { view } = state;
   // The whole canvas UI scales with the window, in fixed proportions; the board draws at view.zoom × ui.
   const ui = useUiScale();
@@ -75,14 +94,14 @@ export function CanvasPage() {
   // The middle button pans from anywhere on the board - over nodes too - as in most canvas tools;
   // captured before the nodes see it, and without the browser's autoscroll.
   const onBoardPointerDownCapture = (e: React.PointerEvent) => {
-    if (e.button !== 1 || (e.target as HTMLElement).closest('.cv-float')) return;
+    if (e.button !== 1 || (e.target as HTMLElement).closest('.cv-float, .cv-overlay')) return;
     e.preventDefault();
     e.stopPropagation();
     document.body.classList.add('cv-panning');
     pan(e);
   };
   const onBoardPointerDown = (e: React.PointerEvent) => {
-    if (e.button !== 0 || (e.target as HTMLElement).closest('.cv-node, .cv-float')) return;
+    if (e.button !== 0 || (e.target as HTMLElement).closest('.cv-node, .cv-float, .cv-overlay')) return;
     setSelected(null);
     setMenu(false);
     pan(e);
@@ -101,7 +120,7 @@ export function CanvasPage() {
     if (!el) return;
     // Pinch (ctrl+wheel) or ⌘-wheel zooms round the cursor; a plain wheel pans.
     const onWheel = (e: WheelEvent) => {
-      if ((e.target as HTMLElement).closest('.cv-float')) return;
+      if ((e.target as HTMLElement).closest('.cv-float, .cv-overlay')) return;
       e.preventDefault();
       const rect = el.getBoundingClientRect();
       if (e.ctrlKey || e.metaKey) zoomAt(stateRef.current.view.zoom * Math.exp(-e.deltaY * 0.01), e.clientX - rect.left, e.clientY - rect.top);
@@ -197,6 +216,19 @@ export function CanvasPage() {
   };
   const patchNode = (id: string, patch: Partial<CanvasNode>) => setState((s) => ({ ...s, nodes: s.nodes.map((k) => (k.id === id ? { ...k, ...patch } : k)) }));
 
+  // The selected scene node, while it waits for its input: the composer around it.
+  const sel = selected ? byId.get(selected) : undefined;
+  const scene = sel && (sel.kind === 'scenegen' || sel.kind === 'scenerecon') ? sel : undefined;
+  const selDraft = useDraft(scene?.id ?? '_none');
+  const composing = scene && (selDraft.status === 'input' || selDraft.status === 'failed') && !selDraft.local;
+  /** The left +: a Text node to the node's left, wired into it. */
+  const addTextInto = (to: CanvasNode) => {
+    const [w, h] = NODE_SIZE.text;
+    const node: CanvasNode = { id: newId(), kind: 'text', x: to.x - w - 110, y: to.y + (to.h - h) / 2, w, h, text: '' };
+    setState((s) => ({ ...s, nodes: [...s.nodes, node], edges: [...s.edges, { from: node.id, to: to.id }] }));
+    setSelected(node.id);
+  };
+
   return (
     <div className="cv-root" style={{ '--cv-ui': ui } as React.CSSProperties}>
       <section className="cv-board" ref={board} onPointerDown={onBoardPointerDown} onPointerDownCapture={onBoardPointerDownCapture}
@@ -220,6 +252,12 @@ export function CanvasPage() {
               onSendToWorld={(w) => addWorldAfter(n, w)} />
           ))}
         </div>
+
+        {composing && scene && (
+          <SceneComposer node={scene} ui={ui} inputs={inputsOf(scene.id)} hasServerVideo={Boolean(selDraft.serverVideo)}
+            rect={{ left: view.x + scene.x * scale, top: view.y + scene.y * scale, width: scene.w * scale, height: scene.h * scale }}
+            onText={(text) => patchNode(scene.id, { text })} onAddText={() => addTextInto(scene)} />
+        )}
 
         {/* Top left: the project pill */}
         <div className="cv-float cv-top-left">
@@ -304,6 +342,7 @@ function NodeView({ node: n, world, selected, onPointerDown, onText, inputs, onP
       <div className="cv-node-label">
         <Icon name={KIND_ICON[n.kind]} size={14} />
         {n.kind === 'image' ? <Icon name="focus" size={14} /> : <span>{NODE_LABEL[n.kind]}</span>}
+        {n.example && <em className="cv-example">示例 · {n.example}</em>}
       </div>
       {n.kind === 'image' && (n.src ? <img src={n.src} alt="" draggable={false} /> : <div className="cv-node-empty"><Icon name="image" size={22} /></div>)}
       {n.kind === 'video' && <div className="cv-node-empty"><Icon name="video" size={22} /></div>}

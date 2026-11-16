@@ -144,3 +144,43 @@ body.cv-panning, body.cv-panning * { cursor: grabbing !important; }
 .cv-sg-gen img { filter: saturate(.85); }
 .cv-sg-open-hint { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 999px; background: rgba(0, 0, 0, 0.55); color: #f4f4f5; font-size: 12px; opacity: 0; transition: opacity .15s; pointer-events: none; }
 .cv-sg-card.openable:hover .cv-sg-open-hint { opacity: 1; }
+
+/* Around the selected scene node (SceneComposer.tsx), in screen space: Upload pill, side +, composer. */
+.cv-overlay { position: absolute; z-index: 20; }
+.cv-ov-upload { transform: translate(-50%, -100%); display: inline-flex; align-items: center; gap: 8px; height: calc(44px * var(--cv-ui, 1)); padding: 0 calc(18px * var(--cv-ui, 1)); border-radius: 999px; background: #1b1b1c; border: 1px solid rgba(255, 255, 255, 0.12); color: #f4f4f5; font: 500 calc(17px * var(--cv-ui, 1)) inherit; cursor: pointer; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); }
+.cv-ov-upload:hover { background: #242426; }
+.cv-ov-plus { transform: translate(-50%, -50%); width: calc(30px * var(--cv-ui, 1)); height: calc(30px * var(--cv-ui, 1)); border-radius: 50%; display: grid; place-items: center; background: transparent; border: 1.5px solid rgba(255, 255, 255, 0.45); color: #d4d4d8; cursor: pointer; }
+.cv-ov-plus:hover { border-color: #fff; color: #fff; background: rgba(255, 255, 255, 0.06); }
+.cv-composer2 { box-sizing: border-box; display: flex; flex-direction: column; gap: calc(12px * var(--cv-ui, 1)); padding: calc(16px * var(--cv-ui, 1)) calc(18px * var(--cv-ui, 1)); border-radius: calc(26px * var(--cv-ui, 1)); background: #1a1a1b; border: 1px solid rgba(255, 255, 255, 0.07); box-shadow: 0 20px 60px rgba(0, 0, 0, 0.55); font-size: calc(15px * var(--cv-ui, 1)); }
+.cv-c2-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cv-c2-tool { width: calc(46px * var(--cv-ui, 1)); height: calc(46px * var(--cv-ui, 1)); border-radius: 12px; display: grid; place-items: center; background: #262628; border: 1px solid rgba(255, 255, 255, 0.06); color: #d4d4d8; cursor: pointer; }
+.cv-c2-tool.on { background: #2e2e31; border-color: rgba(255, 255, 255, 0.16); color: #fff; }
+.cv-c2-tool:hover { background: #303033; }
+.cv-c2-sep { width: 1px; height: 24px; background: rgba(255, 255, 255, 0.12); margin: 0 2px; }
+.cv-c2-chip { display: inline-flex; align-items: center; gap: 6px; height: calc(46px * var(--cv-ui, 1)); max-width: 220px; padding: 0 10px 0 4px; border-radius: 12px; background: #232325; border: 1px solid rgba(255, 255, 255, 0.08); color: #d4d4d8; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cv-c2-chip.linked { padding-left: 10px; color: #a1a1aa; border-style: dashed; }
+.cv-c2-chip img, .cv-c2-chip video { width: calc(38px * var(--cv-ui, 1)); height: calc(38px * var(--cv-ui, 1)); border-radius: 8px; object-fit: cover; flex: none; }
+.cv-c2-chip button { border: 0; background: none; color: #a1a1aa; cursor: pointer; padding: 2px; display: grid; }
+.cv-c2-text { width: 100%; box-sizing: border-box; min-height: calc(110px * var(--cv-ui, 1)); resize: none; border: 0; outline: none; background: transparent; color: #f4f4f5; font: inherit; font-size: calc(19px * var(--cv-ui, 1)); line-height: 1.5; }
+.cv-c2-text::placeholder { color: #71717a; }
+.cv-c2-drop { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; min-height: calc(110px * var(--cv-ui, 1)); border-radius: 16px; border: 1.5px dashed rgba(255, 255, 255, 0.14); background: transparent; color: #e4e4e7; font: inherit; font-size: calc(17px * var(--cv-ui, 1)); cursor: pointer; }
+.cv-c2-drop small { color: #8b8b93; font-size: 12px; }
+.cv-c2-drop:hover { border-color: rgba(255, 255, 255, 0.3); }
+.cv-c2-bar { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.cv-c2-model { display: inline-flex; align-items: center; gap: 8px; color: #f4f4f5; font-weight: 600; white-space: nowrap; }
+.cv-c2-opt { display: inline-flex; align-items: center; gap: 6px; border: 0; background: none; color: #a1a1aa; font: inherit; cursor: pointer; white-space: nowrap; }
+.cv-c2-opt.on { color: #e4e4e7; }
+.cv-c2-status { color: #93c5fd; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cv-c2-err { color: #fca5a5; max-width: 240px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cv-c2-send { display: inline-flex; align-items: center; gap: 8px; height: calc(52px * var(--cv-ui, 1)); padding: 0 6px 0 16px; border-radius: 999px; background: linear-gradient(90deg, #2a2a2d, #202022); border: 1px solid rgba(255, 255, 255, 0.08); color: #f4f4f5; font-weight: 600; flex: none; }
+.cv-c2-send button { width: calc(42px * var(--cv-ui, 1)); height: calc(42px * var(--cv-ui, 1)); border-radius: 50%; border: 0; display: grid; place-items: center; background: #f4f4f5; color: #111; cursor: pointer; }
+.cv-c2-send button:disabled { background: #9a9aa0; cursor: default; }
+
+/* A waiting scene node: what its composer has so far. */
+.cv-sg-wait { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: #71717a; padding: 30px 14px 6px; text-align: center; }
+.cv-sg-wait small { font-size: 11px; }
+.cv-sg-wait.filled { justify-content: flex-start; align-items: stretch; color: #d4d4d8; }
+.cv-sg-wait.filled p { margin: 0; font-size: 12px; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; text-align: left; }
+.cv-sg-wait-media { display: flex; gap: 6px; height: 90px; }
+.cv-sg-wait-media img, .cv-sg-wait-media video { flex: 1; min-width: 0; height: 100%; object-fit: cover; border-radius: 8px; }
+.cv-example { margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-style: normal; font-size: 0.82em; background: rgba(250, 204, 21, 0.14); color: #fde68a; }

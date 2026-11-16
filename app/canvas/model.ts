@@ -18,6 +18,8 @@ export interface CanvasNode {
   /** 场景生成 / 场景重建 nodes: the scene generator project (scenegen/) this node runs. */
   projectId?: string;
   title?: string;
+  /** An example node the canvas added (a finished scene): which input it shows, e.g. 文本. */
+  example?: string;
 }
 
 export interface CanvasEdge { from: string; to: string }
@@ -26,6 +28,8 @@ export interface CanvasState {
   nodes: CanvasNode[];
   edges: CanvasEdge[];
   view: { x: number; y: number; zoom: number };
+  /** The examples were added once (a later visit does not bring back the ones deleted). */
+  examples?: number;
 }
 
 export const NODE_LABEL: Record<NodeKind, string> = {

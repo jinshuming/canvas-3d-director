@@ -15,12 +15,14 @@ import { useEffect, useRef, useState } from 'react';
 
 import { api as sg, file, toDataUrl } from '../../scenegen/web/api.ts';
 import type { Project } from '../../scenegen/web/api.ts';
-import { generateScene, reconstructScene, STAGE_LABEL, watchProject } from '../../scenegen/web/runner.ts';
+import { STAGE_LABEL, watchProject } from '../../scenegen/web/runner.ts';
 import type { RunStatus } from '../../scenegen/web/runner.ts';
 import { api } from '../api.ts';
 import { Icon } from '../icons.tsx';
 import { navigate, scenePath } from '../router.ts';
 import type { CanvasNode } from './model.ts';
+import type { SceneDraft } from './sceneDrafts.ts';
+import { patchDraft, useDraft } from './sceneDrafts.ts';
 
 /** What reaches a node through its incoming edges. */
 export interface NodeInputs { text: string; imageSrc: string | null }
@@ -44,11 +46,11 @@ export function statusOf(p: Project | null): SceneStatus {
   return 'input';
 }
 
-function useProject(id: string | undefined) {
+/** The node's project, polled while its job runs; `version` (a run started or ended) fetches it again. */
+function useProject(id: string | undefined, version: number) {
   const [project, setProject] = useState<Project | null>(null);
-  const [tick, setTick] = useState(0);
-  useEffect(() => (id ? watchProject(id, setProject) : undefined), [id, tick]);
-  return { project, refresh: () => setTick((t) => t + 1) };
+  useEffect(() => (id ? watchProject(id, setProject) : undefined), [id, version]);
+  return { project };
 }
 
 /** Export the project's scene, make a 导演台 (World) whose stage has it, and say which. */
@@ -92,16 +94,6 @@ function ResultActions({ project, node, cover, onSendToWorld }: { project: Proje
   );
 }
 
-function FilePick({ accept, label, onFile, icon }: { accept: string; label: string; onFile: (f: File) => void; icon: 'image' | 'video' }) {
-  const ref = useRef<HTMLInputElement>(null);
-  return (
-    <>
-      <button className="cv-sg-chip" onClick={() => ref.current?.click()}><Icon name={icon} size={13} />{label}</button>
-      <input ref={ref} type="file" accept={accept} hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) onFile(f); e.target.value = ''; }} />
-    </>
-  );
-}
-
 /**
  * Clicking the card - not a drag, not one of its controls - opens the full-screen editor, once
  * the node's task exists.
@@ -119,6 +111,18 @@ function useOpener(node: CanvasNode, project: Project | null) {
     },
     title: '打开全屏 3D 编辑',
   };
+}
+
+/** Tell the canvas what this card shows, so it draws the composer only while the node waits. */
+function usePublish(nodeId: string, draft: SceneDraft, status: SceneStatus, serverVideo: boolean, project: Project | null) {
+  // A submitted run hands over to the server's job once the card sees it.
+  const started = project?.job?.startedAt ?? 0;
+  useEffect(() => {
+    if (draft.local?.phase === 'generating' && draft.submittedAt && started >= draft.submittedAt - 2000) patchDraft(nodeId, { local: null });
+  }, [nodeId, draft.local?.phase, draft.submittedAt, started]);
+  useEffect(() => {
+    if (draft.status !== status || draft.serverVideo !== serverVideo) patchDraft(nodeId, { status, serverVideo });
+  }, [nodeId, status, serverVideo, draft.status, draft.serverVideo]);
 }
 
 function StateBadge({ status }: { status: SceneStatus }) {
@@ -139,36 +143,31 @@ function Generating({ image, video }: { image?: string | null; video?: string | 
   );
 }
 
+/** The waiting card: what the composer under the selected node has been given so far. */
+function Waiting({ kind, draft, inputs, serverVideo }: { kind: 'scenegen' | 'scenerecon'; draft: SceneDraft; inputs: NodeInputs; serverVideo: string | null }) {
+  const text = [inputs.text, draft.text].filter((t) => t.trim()).join(' · ');
+  const image = draft.image?.url ?? inputs.imageSrc;
+  const video = draft.video?.url ?? serverVideo;
+  if (!text && !image && !video) {
+    return <div className="cv-sg-wait"><Icon name={kind === 'scenegen' ? 'scene' : 'video'} size={30} /><small>{kind === 'scenegen' ? '选中节点，在下方输入文本、图片或视频' : '选中节点，在下方上传视频'}</small></div>;
+  }
+  return (
+    <div className="cv-sg-wait filled">
+      {(image || video) && <div className="cv-sg-wait-media">{image && <img src={image} alt="" draggable={false} />}{video && <video src={video} muted />}</div>}
+      {text && <p>{text}</p>}
+    </div>
+  );
+}
+
 /** 场景生成: text / picture / video in, a generated 3DGS scene out. */
-export function SceneGenCard({ node, inputs, onPatch, onSendToWorld }: Props) {
-  const { project, refresh } = useProject(node.projectId);
-  const [text, setText] = useState(node.text ?? '');
-  const [media, setMedia] = useState<{ blob: Blob; url: string; kind: 'image' | 'video' } | null>(null);
-  const [local, setLocal] = useState<RunStatus | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+export function SceneGenCard({ node, inputs, onSendToWorld }: Props) {
+  const draft = useDraft(node.id, node.text ?? '');
+  const { project } = useProject(node.projectId, draft.version);
   const job = project?.job;
-  const localRunning = Boolean(local && local.phase !== 'done' && local.phase !== 'failed');
-  const status: SceneStatus = localRunning ? 'generating' : statusOf(project);
+  const status: SceneStatus = draft.local ? 'generating' : statusOf(project);
   const result = project?.result as { objects?: Array<{ file: string | null }>; files?: { panorama?: string }; alignment?: { floorY: number | null; objectsWithin25: number }; fill?: { after?: { worstHole: number } } | null; credits?: number } | null | undefined;
-  const linkedImage = !media && inputs.imageSrc;
-  const prompt = [inputs.text, text].filter((t) => t.trim()).join('\n');
   const opener = useOpener(node, project);
-
-  const run = async () => {
-    if (!node.projectId) return;
-    setErr(null);
-    try {
-      let image: Blob | null = media?.kind === 'image' ? media.blob : null;
-      if (!media && inputs.imageSrc) image = await (await fetch(inputs.imageSrc)).blob();
-      await generateScene(node.projectId, { text: prompt, image, video: media?.kind === 'video' ? media.blob : null }, setLocal);
-      setLocal(null);
-      refresh();
-    } catch (e) {
-      setLocal({ phase: 'failed', message: (e as Error).message, progress: 0 });
-      setErr((e as Error).message);
-    }
-  };
-
+  usePublish(node.id, draft, status, false, project);
   const done = status === 'done' && result?.files?.panorama;
   return (
     <div className={`cv-sg-card ${status}${'onClick' in opener ? ' openable' : ''}`} {...opener}>
@@ -184,34 +183,12 @@ export function SceneGenCard({ node, inputs, onPatch, onSendToWorld }: Props) {
         </div>
       ) : status === 'generating' ? (
         <Generating image={project && job?.status === 'running' ? file(project.id, 'out/shaded.png', job.startedAt) : null} />
-      ) : (
-        <div className="cv-sg-input">
-          {inputs.text && <div className="cv-sg-linked"><Icon name="text" size={12} />{inputs.text}</div>}
-          <textarea placeholder="描述想要的场景，例如：一间温暖的日式茶室，矮桌、坐垫、纸拉门，傍晚的光" value={text}
-            onChange={(e) => { setText(e.target.value); onPatch({ text: e.target.value }); }} />
-          <div className="cv-sg-row">
-            {media ? (
-              <span className="cv-sg-media">{media.kind === 'image' ? <img src={media.url} alt="" /> : <video src={media.url} muted />}<button onClick={() => setMedia(null)}><Icon name="x" size={12} /></button></span>
-            ) : linkedImage ? (
-              <span className="cv-sg-media"><img src={inputs.imageSrc!} alt="" /><small>连入的图片</small></span>
-            ) : (
-              <>
-                <FilePick accept="image/png,image/jpeg,image/webp" label="图片" icon="image" onFile={(f) => setMedia({ blob: f, url: URL.createObjectURL(f), kind: 'image' })} />
-                <FilePick accept="video/mp4,video/quicktime" label="视频" icon="video" onFile={(f) => setMedia({ blob: f, url: URL.createObjectURL(f), kind: 'video' })} />
-              </>
-            )}
-          </div>
-        </div>
-      )}
+      ) : <Waiting kind="scenegen" draft={draft} inputs={inputs} serverVideo={null} />}
       <div className="cv-sg-foot">
-        {status === 'generating' ? <Progress project={project} local={local} />
+        {status === 'generating' ? <Progress project={project} local={draft.local} />
           : done ? <ResultActions project={project!} node={node} cover={file(project!.id, `out/${result!.files!.panorama!}`)} onSendToWorld={onSendToWorld} />
-          : (
-            <>
-              <button className="cv-enter cv-sg-go" disabled={!node.projectId || (!prompt.trim() && !media && !linkedImage)} onClick={() => void run()}>{status === 'failed' ? '重新生成' : '生成场景'} <Icon name="sparkle" size={14} /></button>
-              {(err || job?.status === 'failed') && <small className="cv-sg-err">{err ?? job?.error}</small>}
-            </>
-          )}
+          : (draft.error || job?.status === 'failed') ? <small className="cv-sg-err">{draft.error ?? job?.error}</small>
+          : null}
       </div>
     </div>
   );
@@ -221,14 +198,12 @@ export function SceneGenCard({ node, inputs, onPatch, onSendToWorld }: Props) {
  * 场景重建: a video in, frames + COLMAP poses → a scene out: today an anchor panorama from the real
  * frames plus JST-2 views at the video's cameras (videoGen.ts); posed-images once JST-2 has it.
  */
-export function SceneReconCard({ node, onSendToWorld }: Props) {
-  const { project, refresh } = useProject(node.projectId);
-  const [video, setVideo] = useState<{ blob: Blob; url: string } | null>(null);
-  const [local, setLocal] = useState<RunStatus | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+export function SceneReconCard({ node, inputs, onSendToWorld }: Props) {
+  const draft = useDraft(node.id);
+  const { project } = useProject(node.projectId, draft.version);
   const [views, setViews] = useState<{ stats: Record<string, number>; first: string } | null>(null);
   const job = project?.job;
-  const status: SceneStatus = local && local.phase !== 'failed' ? 'generating' : statusOf(project);
+  const status: SceneStatus = draft.local ? 'generating' : statusOf(project);
   const done = status === 'done';
   const gen = (project?.result as { mode?: string; verify?: { within25: number }; pathViews?: unknown[]; credits?: number; files?: { panorama?: string } } | null | undefined);
   const generated = gen?.mode === 'generate';
@@ -241,20 +216,9 @@ export function SceneReconCard({ node, onSendToWorld }: Props) {
     });
   }, [done, project?.id, job?.endedAt]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const run = async () => {
-    if (!node.projectId || (!video && !project?.video)) return;
-    setErr(null);
-    try {
-      // A video uploaded before a reload is still on the server: run on it.
-      if (video) await reconstructScene(node.projectId, video.blob, setLocal);
-      else await sg.videoRun(node.projectId, {});
-      setLocal(null);
-      refresh();
-    } catch (e) { setLocal(null); setErr((e as Error).message); }
-  };
-
   const cover = generated && gen?.files?.panorama ? file(project!.id, `out/${gen.files.panorama}`, job?.endedAt) : views?.first ?? null;
-  const videoUrl = video?.url ?? (project?.video ? file(project.id, project.video.file) : null);
+  const serverVideo = project?.video ? file(project.id, project.video.file) : null;
+  usePublish(node.id, draft, status, Boolean(serverVideo), project);
   return (
     <div className={`cv-sg-card ${status}${'onClick' in opener ? ' openable' : ''}`} {...opener}>
       <StateBadge status={status} />
@@ -269,27 +233,13 @@ export function SceneReconCard({ node, onSendToWorld }: Props) {
           </div>
         </div>
       ) : status === 'generating' ? (
-        <Generating image={project && job?.status === 'running' ? file(project.id, 'out/anchor-stitched.png', job.startedAt) : null} video={videoUrl} />
-      ) : (
-        <div className="cv-sg-input">
-          {videoUrl ? <video className="cv-sg-video" src={videoUrl} muted controls /> : (
-            <div className="cv-node-empty cv-col cv-sg-drop">
-              <Icon name="video" size={22} />
-              <FilePick accept="video/mp4,video/quicktime" label="上传视频" icon="video" onFile={(f) => setVideo({ blob: f, url: URL.createObjectURL(f) })} />
-              <small>绕着场景慢慢走或平移拍摄 10–60 秒</small>
-            </div>
-          )}
-        </div>
-      )}
+        <Generating image={project && job?.status === 'running' ? file(project.id, 'out/anchor-stitched.png', job.startedAt) : null} video={draft.video?.url ?? serverVideo} />
+      ) : <Waiting kind="scenerecon" draft={draft} inputs={inputs} serverVideo={serverVideo} />}
       <div className="cv-sg-foot">
-        {status === 'generating' ? <Progress project={project} local={local} />
+        {status === 'generating' ? <Progress project={project} local={draft.local} />
           : done ? <ResultActions project={project!} node={node} cover={cover} onSendToWorld={onSendToWorld} />
-          : (
-            <>
-              <button className="cv-enter cv-sg-go" disabled={!video && !project?.video} onClick={() => void run()}>{status === 'failed' ? '重新重建' : '重建场景'} <Icon name="camera" size={14} /></button>
-              {(err || job?.status === 'failed') && <small className="cv-sg-err">{err ?? job?.error}</small>}
-            </>
-          )}
+          : (draft.error || job?.status === 'failed') ? <small className="cv-sg-err">{draft.error ?? job?.error}</small>
+          : null}
       </div>
     </div>
   );
