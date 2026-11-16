@@ -43,7 +43,7 @@ import { videoToSceneByGenerate } from './videoGen.ts';
 import { falFluxDepthProvider, jst2ReferenceProvider, openaiImageProvider, paintObject, peopleCheck } from './pano.ts';
 import { buildLayout, requestSpec } from './quickLayout.ts';
 import type { PanoProvider } from './pano.ts';
-import { renderConditions, textToScene } from './textScene.ts';
+import { renderConditions, retryObjects, textToScene } from './textScene.ts';
 import { extractKeyframes, readKeyframe } from './keyframes.ts';
 import { videoPipelineAvailable, videoToScene } from './videoScene.ts';
 
@@ -309,7 +309,7 @@ export function scenegenServer(opts: ScenegenOptions): Plugin {
       } : undefined;
       const job = startJob(proj, 'text', (j, signal) => textToScene(layout, join(pdir(proj.id), 'out'), {
         jst2, provider, styleImage, maxFills, vision, objects, prompt: typeof body.prompt === 'string' && body.prompt.trim() ? body.prompt.trim() : undefined, signal,
-        onProgress: (stage, message) => note(j, stage, message, { conditions: 0.05, pano: 0.1, scale: 0.35, scene: 0.45, fill: 0.6, objects: 0.8, verify: 0.97, done: 1 }[stage]),
+        onProgress: (stage, message) => note(j, stage, message, { conditions: 0.05, pano: 0.1, scene: 0.35, scale: 0.45, fill: 0.6, objects: 0.8, compose: 0.92, verify: 0.97, done: 1 }[stage]),
       }));
       return json(res, job, 202);
     }
@@ -354,6 +354,16 @@ export function scenegenServer(opts: ScenegenOptions): Plugin {
       proj.result = null;
       await save(proj);
       return json(res, proj.video);
+    }
+    if (action === '/retry-objects' && m === 'POST') {
+      // SAM 3D again for the objects that failed, from their painted crops; the scene is recomposed.
+      if (!opts.falKey) throw new HttpError(503, 'FAL_KEY is not set: SAM 3D cannot run.');
+      if (!(proj.result as { objects?: Array<{ file: string | null }> } | null)?.objects?.some((o) => !o.file)) throw new HttpError(400, 'No failed objects to retry.');
+      const job = startJob(proj, 'text', (j) => retryObjects(join(pdir(proj.id), 'out'), {
+        sam3d: (image: Uint8Array, box: [number, number, number, number]) => sam3d(image, box, opts.falKey),
+        onProgress: (stage, message) => note(j, stage, message, stage === 'done' ? 1 : 0.5),
+      }));
+      return json(res, job, 202);
     }
     if (action === '/video-run' && m === 'POST') {
       if (!proj.video) throw new HttpError(400, 'Upload a video first.');

@@ -85,3 +85,4 @@
 .se-root .splat-viewer .layers label.failed { color: #ff8a80; }
 .se-root .splat-viewer .layers label.loading { opacity: .6; }
 .se-root .splat-viewer .layers button, .se-root .splat-viewer .overlay button { font-size: 11px; margin-top: 4px; }
+.se-thumb.failed { opacity: .4; outline: 2px solid rgba(239, 68, 68, .7); outline-offset: -2px; }
