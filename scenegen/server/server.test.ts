@@ -10,6 +10,8 @@ import { runAgentTurn } from '../agent/loop.ts';
 import type { ChatItem } from '../agent/loop.ts';
 import { runTool } from '../agent/tools.ts';
 import { paintedBox } from './objects.ts';
+import { camerasFromViews, chooseAnchor, pathTargets } from './videoGen.ts';
+import type { VideoViews } from './videoScene.ts';
 import type { AgentHost } from '../agent/tools.ts';
 import { findCapturePoint } from '../core/capture.ts';
 import { poseToC2W } from '../core/frame.ts';
@@ -195,4 +197,24 @@ test('paintedBox: boxes what was painted, falls back to the blockout box when no
   const none = paintedBox(before, before, S, [60, 80, 140, 130]);
   assert.equal(none.fromPaint, false);
   assert.deepEqual(none.box, [60, 80, 140, 130]);
+});
+
+test('videoGen: OpenCV video cameras become level poses in our world; anchor and path targets', () => {
+  // Y down, floor at y = 1.5; cameras at the origin and 2 m ahead (+Z), looking +Z; one turned right (+X).
+  const cam = (x: number, z: number, look: 'z' | 'x'): number[][] => look === 'z'
+    ? [[1, 0, 0, x], [0, 1, 0, 0], [0, 0, 1, z], [0, 0, 0, 1]]
+    : [[0, 0, 1, x], [0, 1, 0, 0], [-1, 0, 0, z], [0, 0, 0, 1]];
+  const v = {
+    frame: { convention: 'opencv', worldUp: [0, -1, 0], units: 'metres', scale: 'floor', metersPerUnit: 1, floorY: 1.5 },
+    views: [cam(0, 0, 'z'), cam(0.1, 0, 'x'), cam(0, 2, 'z')].map((c2w, index) => ({ index, file: `images/${index}.jpg`, frameTime: index, width: 1280, height: 720, c2w, intrinsic: [0.42, 0.75, 0.5, 0.5] })),
+  } as unknown as VideoViews;
+  const cams = camerasFromViews(v);
+  // +Z in the video (Y down) is -Z (north, yaw 0) in ours; +X stays east (yaw 90); eye 1.5 m above the floor.
+  assert.ok(Math.abs(cams[0]!.pose.yaw) < 1e-6 && Math.abs(cams[0]!.pose.position[1] - 1.5) < 1e-9);
+  assert.ok(Math.abs(cams[1]!.pose.yaw - 90) < 1e-6);
+  assert.deepEqual(cams[2]!.pose.position.map((x) => Math.round(x * 100) / 100), [0, 1.5, -2]);
+  assert.ok(Math.abs(cams[0]!.hfov - 100) < 1);
+  const a = chooseAnchor(cams);
+  assert.equal(a.near.length, 2);
+  assert.deepEqual(pathTargets(cams, a.anchor).map((c) => c.index), [2]);
 });

@@ -1,4 +1,8 @@
-/** Video → frames → COLMAP poses → JST-2 posed-images → scene. */
+/**
+ * Video → frames → COLMAP poses → scene. Today through the endpoints that exist (videoGen.ts): an
+ * anchor panorama from the real frames, JST-2 views at the video's own cameras, reconstruct;
+ * through posed-images (mock) once JST-2 takes images with poses.
+ */
 import { useEffect, useState } from 'react';
 
 import { api, file } from './api.ts';
@@ -7,7 +11,7 @@ import type { Config, Job, Project } from './api.ts';
 
 interface Views { stats: Record<string, unknown> & { seconds?: Record<string, number> }; frame: { scale: string; floorY?: number }; views: Array<{ index: number; file: string; frameTime: number; width: number; height: number; c2w: number[][]; intrinsic: number[] }> }
 
-const STAGES: Record<string, string> = { probe: '读取视频', sample: '抽帧', colmap: 'COLMAP 估计位姿', normalise: '重力与尺度', select: '挑选视角', write: '写出图片+位姿', upload: '上传 JST-2', scene: 'JST-2 重建', done: '完成', start: '开始' };
+const STAGES: Record<string, string> = { probe: '读取视频', sample: '抽帧', colmap: 'COLMAP 估计位姿', normalise: '重力与尺度', select: '挑选视角', write: '写出图片+位姿', upload: '上传 JST-2', stitch: '拼接锚点全景', complete: '补全视频没拍到的部分', scale: '测量尺度', retry: '重试', scene: 'JST-2 建场景', path: '沿视频路径生成视角', rebuild: 'JST-2 重建', fill: '检测并补缺口', verify: '与 COLMAP 点对比', done: '完成', start: '开始' };
 
 export function VideoProject({ project, config, onChanged }: { project: Project; config: Config; onChanged: () => void }) {
   const [video, setVideo] = useState(project.video ?? null);
@@ -39,7 +43,10 @@ export function VideoProject({ project, config, onChanged }: { project: Project;
     try { setVideo(await api.video(project.id, f)); setResult(null); onChanged(); } catch (e) { setError((e as Error).message); } finally { setUploading(false); }
   }
 
-  const r = result as null | { views: number; endpoint: string; credits: number; seconds: Record<string, number>; stats: Record<string, number> };
+  const r = result as null | { views: number; endpoint: string; credits: number; seconds: Record<string, number>; stats: Record<string, number>; mode?: 'generate';
+    anchor?: { index: number; frames: number; coverage: number }; metersPerUnit?: number; verify?: { points: number; within25: number; medianLogError: number };
+    pathViews?: Array<{ index: number; file: string; image: string | null; position: number[]; yaw: number }>; files?: Record<string, string> };
+  const gen = r?.mode === 'generate';
   return (
     <div className="video-project">
       <section className="video-left">
@@ -50,7 +57,7 @@ export function VideoProject({ project, config, onChanged }: { project: Project;
         <h3>2 · 估计位姿并重建</h3>
         <label className="check"><input type="checkbox" checked={square} onChange={(e) => setSquare(e.target.checked)} />裁成 1024×1024（与 JST-2 自己的视角一致）</label>
         <button className="primary wide" disabled={!video || job?.status === 'running' || !config.video.available} onClick={() => void api.videoRun(project.id, square ? { square: 1024 } : {}).then(setJob).catch((e) => setError((e as Error).message))}>开始</button>
-        <p className="muted small">posed-images 接口：{config.video.endpoint === 'mock' ? '模拟（JST-2 尚未开放，结果为稀疏点云预览）' : '线上 JST-2'}</p>
+        <p className="muted small">{config.video.endpoint === 'mock' ? 'JST-2 还不能上传图片+位姿：用视频帧拼出锚点全景建场景，再在视频自己的相机位置生成视角并重建（离锚点越远，画面越多是模型补出来的）。' : 'posed-images：线上 JST-2'}</p>
         {!config.video.available && <p className="warn">视频管线未安装：在 scenegen/py 建 .venv 并安装 requirements.txt。</p>}
         {job && <div className={`job ${job.status}`}>
           <div className="bar"><div style={{ width: `${Math.round(job.progress * 100)}%` }} /></div>
@@ -67,17 +74,25 @@ export function VideoProject({ project, config, onChanged }: { project: Project;
             <span>重投影误差 <b>{Number(views.stats.reprojErrorPx).toFixed(2)} px</b></span>
             <span>尺度 <b>{views.frame.scale === 'floor' ? '按地面（相机高 1.5 m）' : '估计'}</b></span>
           </div>
-          {r && <div className="video-scene"><SplatViewer url={file(project.id, 'out/scene.spz', job?.endedAt)} /><p className="muted small">posed-images 是模拟接口时，这里是 COLMAP 稀疏点云的预览；接口上线后就是 JST-2 的重建。</p></div>}
+          {r && <div className="video-scene"><SplatViewer url={file(project.id, 'out/scene.spz', job?.endedAt)} /><p className="muted small">{gen ? '起点是锚点（视频里环顾最多的位置）。' : 'posed-images 是模拟接口时，这里是 COLMAP 稀疏点云的预览；接口上线后就是 JST-2 的重建。'}</p></div>}
+          {gen && r.files && <div className="gen-anchor">
+            <h3>锚点全景：视频帧拼接 → 补全</h3>
+            <div className="pair"><img src={file(project.id, `out/${r.files.stitched}`, job?.endedAt)} alt="" /><img src={file(project.id, `out/${r.files.panorama}`, job?.endedAt)} alt="" /></div>
+            {!!r.pathViews?.length && <><h3>沿视频路径：真实帧 | JST-2 在同一相机生成的视角</h3>
+              <div className="gen-views">{r.pathViews.map((v) => <figure key={v.index}><img src={file(project.id, `out/bundle/${v.file}`)} alt="" /><img src={v.image ? file(project.id, `out/${v.image}`, job?.endedAt) : ''} alt="" /><figcaption>第 {v.index} 帧 · 离锚点 {Math.hypot(v.position[0]!, v.position[2]!).toFixed(1)} m</figcaption></figure>)}</div></>}
+          </div>}
           <CameraPath views={views.views} />
           <div className="frames">{views.views.map((v) => <figure key={v.index}><img src={file(project.id, `out/bundle/${v.file}`)} alt="" loading="lazy" /><figcaption>{v.frameTime.toFixed(1)}s</figcaption></figure>)}</div>
           {r && <div className="result">
             <table><tbody>
-              <tr><td>JST-2</td><td>{r.endpoint === 'mock' ? '模拟接口' : '线上'} · {r.views} 个视角 · {r.credits} 额度</td></tr>
+              <tr><td>JST-2</td><td>{gen ? '锚点全景 + 路径生成' : r.endpoint === 'mock' ? '模拟接口' : '线上'} · {r.views} 个视角 · {r.credits} 额度</td></tr>
+              {gen && r.anchor && <tr><td>锚点</td><td>第 {r.anchor.index} 帧，附近 {r.anchor.frames} 帧拼接 · 1 单位 = {r.metersPerUnit} m</td></tr>}
+              {gen && r.verify && <tr><td>与视频一致</td><td>COLMAP 点 {Math.round(r.verify.within25 * 100)}% 在 ±25% 内（{r.verify.points} 个点）</td></tr>}
               <tr><td>耗时</td><td>{Object.entries(r.seconds).map(([k, v]) => `${k} ${v}s`).join(' · ')}</td></tr>
             </tbody></table>
             <div className="row">
               <a href={file(project.id, 'out/scene.spz', job?.endedAt)} download>下载 .spz</a>
-              <a href={file(project.id, 'out/bundle/request.json')} target="_blank" rel="noreferrer">posed-images 请求体</a>
+              {!gen && <a href={file(project.id, 'out/bundle/request.json')} target="_blank" rel="noreferrer">posed-images 请求体</a>}
             </div>
             <button className="primary wide" onClick={() => void api.exportScene(project.id).then((x) => { setExported({ sceneId: x.sceneId, at: new Date().toISOString() }); onChanged(); }).catch((e) => setError((e as Error).message))}>{exported ? '已导入导演台 · 再导一次' : '导入导演台素材库'}</button>
           </div>}
