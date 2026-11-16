@@ -20,7 +20,11 @@
 .se-btn.primary { background: #f4f4f5; color: #0b0b0c; border-color: #f4f4f5; font-weight: 600; }
 .se-btn.primary:hover:not(:disabled) { background: #fff; }
 
-.se-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 380px; }
+.se-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+/* The agent column is the 3D director's own panel (app/agent/AgentPanel.tsx). */
+.se-body > .ag-panel { min-height: 0; border-radius: 0; }
+.se-gen { display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 12px; white-space: nowrap; flex: none; border-radius: 12px; font-size: 14px; color: #e4e4e7; background: #232325; }
+.se-gen:disabled { opacity: .45; }
 .se-stage { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .se-tabs { flex: none; display: flex; align-items: center; gap: 6px; padding: 10px 14px; }
 .se-tabs button { height: 30px; padding: 0 12px; border-radius: 9px; border: 1px solid rgba(255,255,255,.08); background: transparent; color: #a1a1aa; font: inherit; cursor: pointer; }

@@ -20,6 +20,8 @@ import type { Project } from '../../scenegen/web/api.ts';
 import { STAGE_LABEL } from '../../scenegen/web/runner.ts';
 import { SplatViewer } from '../../scenegen/web/SplatViewer.tsx';
 import { Viewport } from '../../scenegen/web/Viewport.tsx';
+import { AgentPanel } from '../agent/AgentPanel.tsx';
+import type { ChatItem as PanelItem, TurnStats } from '../agent/useAgent.ts';
 import { Icon } from '../icons.tsx';
 import { linkProps, navigate, worldPath } from '../router.ts';
 import { appendWorldAfter } from './model.ts';
@@ -106,20 +108,72 @@ type GenResult = {
   objects?: Array<{ id: string; label: string; file: string | null; crop: string; spread: number | null; error: string | null }>;
 };
 
+/** How the scene agent's tools, the fast blockout and the generation's stages read in the log. */
+const SCENE_TOOL_LABEL: Record<string, string> = {
+  quick_layout: '快速摆白模', get_layout: '查看白模', set_room: '设置房间', set_outdoor: '设为室外', add_opening: '添加门窗',
+  place_objects: '摆放物体', update_object: '调整物体', remove_objects: '移除物体', check_layout: '检查白模', set_style: '设置风格',
+  look: '观察白模', choose_capture_point: '选择拍摄点', set_capture_point: '设置拍摄点', generate_scene: '生成场景',
+  start: '开始生成', conditions: '渲染白模条件图', pano: '生成全景图', scale: '测量尺度', scene: 'JST-2 建环境', fill: '检测并补缺口',
+  objects: 'SAM 3D 生成物体', compose: '合成', verify: '校验', done: '完成',
+};
+
+let seq = 0;
+const nid = () => `i${++seq}`;
+
+/** The stored chat (scenegen's format) as the panel's lines. */
+function chatToPanel(items: ChatItem[]): PanelItem[] {
+  return items.map((it): PanelItem => (it.role === 'tool'
+    ? { kind: 'tool', id: nid(), name: it.name, args: JSON.stringify(it.args), status: it.isError ? 'error' : 'done', result: it.text, image: it.image }
+    : it.role === 'user' ? { kind: 'user', id: nid(), text: it.text } : { kind: 'assistant', id: nid(), text: it.text }));
+}
+
+/** A project laid out on the canvas has no chat: its prompt and its blockout, as the log's start. */
+function canvasHistory(project: Project): PanelItem[] {
+  const l = project.layout;
+  if (!l.objects.length) return [];
+  const out: PanelItem[] = [];
+  if (l.prompt) out.push({ kind: 'user', id: nid(), text: l.prompt });
+  out.push({ kind: 'tool', id: nid(), name: 'quick_layout', args: JSON.stringify({ title: l.title, objects: l.objects.length }), status: 'done',
+    result: `${l.room ? `室内 ${l.room.width}×${l.room.depth}×${l.room.height} m` : '室外'}\n${l.objects.map((o) => `${o.key ? '★ ' : ''}${o.id}: ${o.label}`).join('\n')}\n风格：${l.style.summary}` });
+  return out;
+}
+
+/** The latest generation, step by step from its job log, and how it ended. */
+function jobToPanel(project: Project): PanelItem[] {
+  const job = project.job;
+  if (!job || job.kind !== 'text') return [];
+  const out: PanelItem[] = job.log.map((line, i): PanelItem => {
+    const m = /^\[(\d+)s\] (\w+): (.*)$/.exec(line);
+    const stage = m?.[2] ?? 'start';
+    const last = i === job.log.length - 1;
+    return { kind: 'tool', id: nid(), name: stage, args: JSON.stringify({ message: m?.[3] ?? line }), status: last && job.status === 'running' ? 'running' : 'done', result: `${m ? `${m[1]} 秒 · ` : ''}${m?.[3] ?? line}` };
+  });
+  const r = project.result as GenResult | null | undefined;
+  if (job.status === 'done' && r) {
+    const objs = (r.objects ?? []).filter((o) => o.file);
+    out.push({ kind: 'assistant', id: nid(), text: `场景生成好了：与白模 **${Math.round((r.alignment?.within25 ?? 0) * 100)}%** 一致，${objs.length ? `${objs.length} 个关键物体由 SAM 3D 单独生成（${objs.map((o) => o.label).join('、')}），` : ''}用了 ${r.credits} 额度、${Math.round(Object.values(r.seconds ?? {}).reduce((a, b) => a + b, 0))} 秒。可以在左边看 3D 场景，或继续说要改什么。` });
+  }
+  if (job.status === 'failed') out.push({ kind: 'error', id: nid(), text: `生成失败：${job.error ?? '未知错误'}` });
+  return out;
+}
+
 function GenEditor({ project, reload }: { project: Project; reload: () => Promise<void> }) {
   const [layout, setLayout] = useState<Layout>(project.layout);
   const [chat, setChat] = useState<ChatState>(() => (project.chat[0] as ChatState | undefined) ?? { items: [], previousId: null });
-  const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
+  const [stream, setStream] = useState('');
+  const [lastTurn, setLastTurn] = useState<TurnStats | null>(null);
+  const [model, setModel] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const abort = useRef<AbortController | null>(null);
   const result = project.result as GenResult | null | undefined;
   const job = project.job;
   const running = job?.status === 'running';
   const [view, setView] = useState<'scene' | 'blockout' | 'pano'>(result?.files?.scene && !running ? 'scene' : 'blockout');
   const layoutRef = useRef(layout);
   layoutRef.current = layout;
-  const log = useRef<HTMLDivElement>(null);
 
+  useEffect(() => { void sg.config().then((c) => setModel(c.agent?.model ?? null)).catch(() => {}); }, []);
   // The layout the server has (the canvas may have laid it out), unless a turn is changing it here.
   useEffect(() => { if (!busy) setLayout(project.layout); }, [project.updatedAt]); // eslint-disable-line react-hooks/exhaustive-deps
   // A run that finishes shows its scene.
@@ -128,7 +182,6 @@ function GenEditor({ project, reload }: { project: Project; reload: () => Promis
     if (wasRunning.current && !running && result?.files?.scene) setView('scene');
     wasRunning.current = running;
   }, [running, result?.files?.scene]);
-  useEffect(() => { log.current?.scrollTo({ top: log.current.scrollHeight }); }, [chat.items.length, busy]);
 
   const persist = async (l: Layout, c: ChatState) => {
     // Pictures stay out of the stored chat: they are big and the model already has them.
@@ -136,12 +189,15 @@ function GenEditor({ project, reload }: { project: Project; reload: () => Promis
     await sg.put(project.id, { layout: l, title: l.title, chat: stored });
   };
 
-  const send = async () => {
-    const text = draft.trim();
+  const send = async (raw: string) => {
+    const text = raw.trim();
     if (!text || busy || running) return;
-    setDraft(''); setBusy(true);
+    setBusy(true); setStream('');
+    const t0 = Date.now();
     let state = chat;
-    const emit = (it: ChatItem) => { state = { ...state, items: [...state.items, it] }; setChat(state); };
+    const emit = (it: ChatItem) => { state = { ...state, items: [...state.items, it] }; setChat(state); if (it.role !== 'user') setStream(''); };
+    const ctl = new AbortController();
+    abort.current = ctl;
     try {
       if (!layoutRef.current.objects.length) {
         // Nothing laid out yet: the fast path - one structured call, deterministic placement.
@@ -149,7 +205,9 @@ function GenEditor({ project, reload }: { project: Project; reload: () => Promis
         const q = await sg.quickLayout(project.id, { text });
         setLayout(q.layout); layoutRef.current = q.layout;
         setView('blockout');
-        emit({ role: 'assistant', text: `白模已摆好：${q.layout.objects.length} 个物体，关键物体 ${q.keys.join('、') || '无'}（${(q.seconds.model + q.seconds.place).toFixed(1)} 秒）。可以点「生成场景」，或继续说要改什么。` });
+        emit({ role: 'tool', name: 'quick_layout', args: { text }, text: `${q.layout.room ? `室内 ${q.layout.room.width}×${q.layout.room.depth}×${q.layout.room.height} m` : '室外'}，${q.layout.objects.length} 个物体（模型 ${q.seconds.model.toFixed(1)} 秒 + 摆放 ${q.seconds.place.toFixed(1)} 秒）\n${q.layout.objects.map((o) => `${o.key ? '★ ' : ''}${o.id}: ${o.label}`).join('\n')}` });
+        emit({ role: 'assistant', text: `白模摆好了：${q.layout.objects.length} 个物体，关键物体 ${q.keys.join('、') || '无'}。可以点「生成场景」，或继续说要改什么。` });
+        setLastTurn({ steps: 1, toolCalls: 1, toolErrors: 0, tools: ['quick_layout'], ms: Date.now() - t0, inputTokens: 0, outputTokens: 0 });
       } else {
         const work = structuredClone(layoutRef.current);
         const host = projectHost(project.id, work, {
@@ -157,14 +215,17 @@ function GenEditor({ project, reload }: { project: Project; reload: () => Promis
           generateBody: () => ({ objects: true }), onJob: () => void reload(),
         });
         setView('blockout');
-        const out = await runAgentTurn(text, host, { respond: sg.respondAgent, previousId: state.previousId, emit });
+        const out = await runAgentTurn(text, host, { respond: sg.respondAgent, previousId: state.previousId, emit, signal: ctl.signal, onText: (d) => setStream((s) => s + d) });
         state = { ...state, previousId: out.previousId };
         setChat(state);
+        setLastTurn({ ...out.stats, ms: Date.now() - t0 });
         setLayout(structuredClone(work)); layoutRef.current = work;
       }
     } catch (e) {
-      emit({ role: 'assistant', text: `出错了：${(e as Error).message}` });
+      if (!ctl.signal.aborted) emit({ role: 'assistant', text: `出错了：${(e as Error).message}` });
     } finally {
+      abort.current = null;
+      setStream('');
       await persist(layoutRef.current, state).catch(() => {});
       setBusy(false);
       void reload();
@@ -176,6 +237,19 @@ function GenEditor({ project, reload }: { project: Project; reload: () => Promis
     await sg.generate(project.id, { objects: true });
     await reload();
   };
+  const reset = () => { const c = { items: [], previousId: null }; setChat(c); setLastTurn(null); void persist(layoutRef.current, c); };
+
+  // The whole log: the conversation (or, for a canvas run, its prompt and blockout), then the latest
+  // generation's stages - right after the agent's generate_scene call when it started one.
+  const panel = (() => {
+    seq = 0;
+    const talk = chat.items.length ? chatToPanel(chat.items) : canvasHistory(project);
+    const gen = jobToPanel(project);
+    const at = chat.items.map((it) => (it.role === 'tool' ? it.name : '')).lastIndexOf('generate_scene');
+    const items = at >= 0 ? [...talk.slice(0, at + 1), ...gen, ...talk.slice(at + 1)] : [...talk, ...gen];
+    if (busy && stream) items.push({ kind: 'assistant', id: 'stream', text: stream, streaming: true });
+    return items;
+  })();
 
   const stamp = job?.endedAt ?? 0;
   const objects = (result?.objects ?? []).filter((o) => o.file);
@@ -208,35 +282,20 @@ function GenEditor({ project, reload }: { project: Project; reload: () => Promis
         </div>}
       </section>
 
-      <aside className="se-chat">
-        <header><Icon name="sparkle" size={16} />场景 Agent</header>
-        <div className="se-log" ref={log}>
-          {!chat.items.length && <div className="se-hint">
-            <p>用一句话描述场景，例如「一间温暖的日式茶室，矮桌、坐垫、纸拉门，傍晚的光」。</p>
-            <p>第一句几秒内摆成白模；之后可以继续说要改什么（加一张桌子、窗户放在东墙、换成夜晚），再点「生成场景」。</p>
-          </div>}
-          {chat.items.map((it, i) => <ChatRow key={i} item={it} />)}
-          {busy && <div className="se-msg assistant pending">思考中…</div>}
-        </div>
-        <div className="se-composer">
-          <textarea value={draft} disabled={busy || running} placeholder={layout.objects.length ? '说说要改什么…' : '描述想要的场景…'}
-            onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }} />
-          <div className="se-row">
-            <button className="se-btn" disabled={!layout.objects.length || busy || running} onClick={() => void generate().catch((e) => setChat((c) => ({ ...c, items: [...c.items, { role: 'assistant', text: `出错了：${(e as Error).message}` }] })))}>
-              <Icon name="sparkle" size={15} />{result ? '重新生成' : '生成场景'}
-            </button>
-            <span className="se-spacer" />
-            <button className="se-send" disabled={!draft.trim() || busy || running} onClick={() => void send()}><Icon name="arrowUp" size={18} /></button>
-          </div>
-        </div>
-      </aside>
+      <AgentPanel items={panel} busy={busy || running} model={model} lastTurn={busy ? null : lastTurn}
+        onSend={(t) => void send(t)} onStop={() => abort.current?.abort()} onReset={reset} onAnswer={() => {}}
+        toolLabels={SCENE_TOOL_LABEL} workingLabel={running ? '正在生成场景…' : '正在摆白模…'}
+        placeholder={layout.objects.length ? '说说要改什么…' : '描述想要的场景…'}
+        hello={<>
+          <h2>场景 Agent</h2>
+          <h1>想要一个什么样的场景？</h1>
+          <p className="ag-lead">用一句话描述，例如「一间温暖的日式茶室，矮桌、坐垫、纸拉门，傍晚的光」。第一句几秒内摆成白模；之后可以继续说要改什么，再生成。每一步思考和操作都会记录在这里。</p>
+        </>}
+        actions={<button className="cv-ghost se-gen" disabled={!layout.objects.length || busy || running} title={result ? '重新生成' : '生成场景'}
+          onClick={() => void generate().catch((e) => setChat((c) => ({ ...c, items: [...c.items, { role: 'assistant', text: `出错了：${(e as Error).message}` }] })))}>
+          <Icon name="sparkle" size={16} />{result ? '重新生成' : '生成场景'}</button>} />
     </div>
   );
-}
-
-function ChatRow({ item }: { item: ChatItem }) {
-  if (item.role === 'tool') return <details className={`se-msg tool${item.isError ? ' err' : ''}`}><summary>{item.name}</summary><pre>{item.text}</pre></details>;
-  return <div className={`se-msg ${item.role}`}>{item.text}</div>;
 }
 
 // ── 场景重建 ───────────────────────────────────────────────────────────────
