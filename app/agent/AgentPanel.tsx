@@ -28,10 +28,20 @@ interface Props {
   onReset: () => void;
   onAnswer: (id: string, ok: boolean) => void;
   /** The tool bench, behind the "…" menu. */
-  bench: React.ReactNode;
+  bench?: React.ReactNode;
+  /** How this agent's tools read in the transcript, over the director's own labels. */
+  toolLabels?: Record<string, string>;
+  /** What a running group of steps says (default: the director's). */
+  workingLabel?: string;
+  /** The empty chat, instead of the director's greeting. */
+  hello?: React.ReactNode;
+  /** More controls in the composer row (the scene editor's 生成场景). */
+  actions?: React.ReactNode;
+  /** The input box's placeholder. */
+  placeholder?: string;
 }
 
-export function AgentPanel({ items, busy, model, lastTurn, fresh = false, onSend, onStop, onReset, onAnswer, bench }: Props) {
+export function AgentPanel({ items, busy, model, lastTurn, fresh = false, onSend, onStop, onReset, onAnswer, bench, toolLabels, workingLabel, hello, actions, placeholder }: Props) {
   const [text, setText] = useState('');
   const [wide, setWide] = useState(false);
   const [showBench, setShowBench] = useState(false);
@@ -61,12 +71,12 @@ export function AgentPanel({ items, busy, model, lastTurn, fresh = false, onSend
         <div className="cv-spacer" />
         <button className="cv-ghost" title="新对话" onClick={onReset}><Icon name="edit" size={20} /></button>
         <button className="cv-ghost" title={wide ? '收窄' : '加宽'} onClick={() => setWide((w) => !w)}><Icon name="expand" size={20} /></button>
-        <button className={`cv-ghost ${showBench ? 'on' : ''}`} title="工具台（手动调用 Agent 工具）" onClick={() => setShowBench((b) => !b)}><Icon name="more" size={20} /></button>
+        {bench && <button className={`cv-ghost ${showBench ? 'on' : ''}`} title="工具台（手动调用 Agent 工具）" onClick={() => setShowBench((b) => !b)}><Icon name="more" size={20} /></button>}
       </header>
 
       {showBench ? <div className="ag-bench">{bench}</div> : (
         <div className="cv-chat-body ag-body" ref={scroller}>
-          {items.length === 0 ? (
+          {items.length === 0 && hello ? <div className="cv-hello">{hello}</div> : items.length === 0 ? (
             <div className="cv-hello">
               {fresh ? (
                 <>
@@ -95,7 +105,7 @@ export function AgentPanel({ items, busy, model, lastTurn, fresh = false, onSend
           ) : (
             <div className="ag-thread">
               {group(items).map((g) => (g.kind === 'tools'
-                ? <ToolGroup key={g.items[0]!.id} tools={g.items} open={busy && g.last} onZoom={setZoom} />
+                ? <ToolGroup key={g.items[0]!.id} tools={g.items} open={busy && g.last} onZoom={setZoom} labels={toolLabels} working={workingLabel} />
                 : <Line key={g.item.id} item={g.item} onAnswer={onAnswer} />))}
               {busy && !items.some((i) => i.kind === 'assistant' && i.streaming) && <div className="ag-thinking"><span /><span /><span /></div>}
               {!busy && lastTurn && <div className="ag-stats">{lastTurn.toolCalls} 次工具调用 · {(lastTurn.ms / 1000).toFixed(1)}s · {Math.round((lastTurn.inputTokens + lastTurn.outputTokens) / 1000)}k tokens</div>}
@@ -107,12 +117,13 @@ export function AgentPanel({ items, busy, model, lastTurn, fresh = false, onSend
       <div className="cv-composer">
         <textarea ref={box} rows={2} value={text} disabled={!model} onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); } }}
-          placeholder={model ? (fresh && !items.length ? '描述你想搭的场景…' : 'Type anything') : 'Agent 未配置'} />
+          placeholder={model ? placeholder ?? (fresh && !items.length ? '描述你想搭的场景…' : 'Type anything') : 'Agent 未配置'} />
         <div className="cv-composer-row">
           <button className="cv-pill cv-square sm" title="添加参考（即将支持）"><Icon name="plus" size={18} /></button>
           <button className="cv-ghost" title="手动模式：每次由你发起"><Icon name="hand" size={20} /></button>
           <div className="cv-spacer" />
           <span className="cv-ring" title={lastTurn ? `上一轮 ${lastTurn.inputTokens + lastTurn.outputTokens} tokens` : ''} />
+          {actions}
           <span className="cv-ghost ag-model" title={model ?? ''}><Icon name="sparkle" size={18} /></span>
           <button className="cv-ghost" title="语音（即将支持）"><Icon name="mic" size={20} /></button>
           {busy
@@ -158,7 +169,7 @@ function Line({ item, onAnswer }: { item: ChatItem; onAnswer: (id: string, ok: b
   return null;
 }
 
-function ToolGroup({ tools, open, onZoom }: { tools: Extract<ChatItem, { kind: 'tool' }>[]; open: boolean; onZoom: (src: string) => void }) {
+function ToolGroup({ tools, open, onZoom, labels, working }: { tools: Extract<ChatItem, { kind: 'tool' }>[]; open: boolean; onZoom: (src: string) => void; labels?: Record<string, string>; working?: string }) {
   const [expanded, setExpanded] = useState(false);
   const [detail, setDetail] = useState<string | null>(null);
   const running = tools.some((t) => t.status === 'running');
@@ -169,7 +180,7 @@ function ToolGroup({ tools, open, onZoom }: { tools: Extract<ChatItem, { kind: '
     <div className="ag-tools">
       <button className="ag-tools-head" onClick={() => setExpanded((e) => !e)}>
         <span className={`ag-spin ${running ? 'on' : ''}`}><Icon name={running ? 'loop' : 'sparkle'} size={14} /></span>
-        <span>{running ? '正在操作片场…' : `执行了 ${tools.length} 步操作`}{errors ? <em> · {errors} 步出错后已调整</em> : null}</span>
+        <span>{running ? working ?? '正在操作片场…' : `执行了 ${tools.length} 步操作`}{errors ? <em> · {errors} 步出错后已调整</em> : null}</span>
         <Icon name={expanded ? 'chevronDown' : 'chevronRight'} size={14} className="cv-muted" />
       </button>
       {!expanded && !open && tools.length > 2 && <div className="ag-more">… 还有 {tools.length - 2} 步</div>}
@@ -177,7 +188,7 @@ function ToolGroup({ tools, open, onZoom }: { tools: Extract<ChatItem, { kind: '
         <div key={t.id} className={`ag-tool ${t.status}`}>
           <button className="ag-tool-row" onClick={() => setDetail((d) => (d === t.id ? null : t.id))}>
             <span className="ag-dot" />
-            <span className="ag-tool-name">{TOOL_LABEL[t.name] ?? t.name}</span>
+            <span className="ag-tool-name">{labels?.[t.name] ?? TOOL_LABEL[t.name] ?? t.name}</span>
             <span className="ag-tool-args">{brief(t.args)}</span>
           </button>
           {detail === t.id && <pre className="ag-tool-detail">{t.name}({pretty(t.args)}){'\n→ '}{(t.result ?? '…').slice(0, 1500)}</pre>}
@@ -200,7 +211,7 @@ function rich(text: string): React.ReactNode {
 function brief(args: string): string {
   try {
     const a = JSON.parse(args) as Record<string, unknown>;
-    const pick = ['character', 'asset', 'motion', 'kind', 'view', 'subject', 'size', 'side', 'scene', 'shot_id'].filter((k) => a[k] !== undefined).map((k) => (typeof a[k] === 'string' ? a[k] : JSON.stringify(a[k])));
+    const pick = ['character', 'asset', 'motion', 'kind', 'view', 'subject', 'size', 'side', 'scene', 'shot_id', 'message', 'id', 'wall', 'title', 'summary'].filter((k) => a[k] !== undefined).map((k) => (typeof a[k] === 'string' ? a[k] : JSON.stringify(a[k])));
     return pick.join(' · ').slice(0, 48);
   } catch { return ''; }
 }
