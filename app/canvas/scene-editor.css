@@ -90,3 +90,21 @@
 .se-root .splat-viewer .expand-btn::before { content: "⤢"; font-size: 15px; }
 .se-root .splat-viewer .expand-btn:hover:not(:disabled) { background: #f4f4f5; color: #0b0b0c; }
 .se-root .splat-viewer .expand-btn:disabled { opacity: .5; cursor: default; }
+
+/* 参考图: every picture the generation made or worked from. */
+.se-refs { position: relative; overflow: auto; padding: 16px 18px 28px; display: flex; flex-direction: column; gap: 20px; }
+.se-refs h4 { margin: 0 0 10px; font-size: 13px; color: #e4e4e7; font-weight: 600; }
+.se-refs h4 span { margin-left: 8px; font-weight: 400; color: #8b8b93; font-size: 12px; }
+.se-ref-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; }
+.se-ref-row.objs { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 10px; }
+.se-ref { margin: 0; border-radius: 10px; overflow: hidden; background: #0f0f10; border: 1px solid rgba(255,255,255,.06); cursor: zoom-in; }
+.se-ref.on { border-color: rgba(134, 239, 172, .7); }
+.se-ref img { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; }
+.se-ref.wide img { aspect-ratio: 2; }
+.se-ref figcaption { display: flex; flex-direction: column; gap: 2px; padding: 7px 10px 9px; font-size: 12px; }
+.se-ref figcaption b { color: #ececee; font-weight: 600; }
+.se-ref figcaption span { color: #8b8b93; }
+.se-prompt { margin: 0; white-space: pre-wrap; font: 12px/1.6 ui-monospace, Menlo, monospace; color: #c4c4c8; background: #0f0f10; padding: 12px 14px; border-radius: 10px; }
+.se-zoom { position: fixed; inset: 0; z-index: 50; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; background: rgba(0,0,0,.85); cursor: zoom-out; }
+.se-zoom img { max-width: 92vw; max-height: 84vh; border-radius: 10px; }
+.se-zoom span { color: #e4e4e7; font-size: 13px; }
