@@ -19,6 +19,8 @@ import { toServiceC2W } from '../core/frame.ts';
 import type { CameraPose } from '../core/frame.ts';
 import { buildScene } from '../core/geometry.ts';
 import { concatGaussians, readSpzGaussians, scaleSpz, transformGaussians, writeSpzGaussians } from '../core/gaussians.ts';
+import type { Gaussians } from '../core/gaussians.ts';
+import { seatObjects } from './seatScene.ts';
 import { depthImage, depthRange, renderEquirect, semanticImage, shadedImage } from '../core/render.ts';
 import { distanceToFloor, readSpz } from '../core/spz.ts';
 import type { Layout } from '../core/types.ts';
@@ -114,18 +116,32 @@ const shiftOf = (envScale: number | null) => (envScale !== null && envScale > 0.
  * file rewritten, `shifted` set - so a later compose, after retrying a failed object, leaves it be).
  */
 export async function composeScene(dir: string, layout: Layout, origin: [number, number, number], envSpz: Uint8Array, objects: ObjectAsset[], shift: number | null): Promise<Uint8Array> {
-  const parts = [readSpzGaussians(envSpz)];
+  const env = readSpzGaussians(envSpz);
+  const parts = [env];
+  const loaded: Array<{ o: ObjectAsset; g: Gaussians; src: Layout['objects'][number] | undefined; changed: boolean }> = [];
   for (const o of objects) {
     if (!o.file) continue;
     const g = readSpzGaussians(new Uint8Array(await readFile(join(dir, o.file))));
     const src = layout.objects.find((x) => x.id === o.id);
+    let changed = false;
     if (shift !== null && src && !o.shifted) {
       const rel = [src.position[0] - origin[0], src.position[2] - origin[2]];
       transformGaussians(g, [[1, 0, 0], [0, 1, 0], [0, 0, 1]], 1, [rel[0]! * (shift - 1), 0, rel[1]! * (shift - 1)]);
-      await writeFile(join(dir, o.file), writeSpzGaussians(g));
+      changed = true;
     }
     o.shifted = shift !== null || o.shifted;
-    parts.push(g);
+    loaded.push({ o, g, src, changed });
+  }
+  // Upright and on what they stand on (the environment's real floor, or the object under them) -
+  // once per object, so a recompose after an expansion or a retry leaves the seated ones be.
+  const toSeat = loaded.filter((l) => !l.o.seat && l.src);
+  if (toSeat.length) {
+    const seats = seatObjects(env, toSeat.map((l) => ({ id: l.o.id, obj: l.src!, g: l.g })), origin[1]);
+    for (const l of toSeat) { const st = seats.get(l.o.id); if (st) { l.o.seat = st; l.changed = true; } }
+  }
+  for (const l of loaded) {
+    if (l.changed) await writeFile(join(dir, l.o.file!), writeSpzGaussians(l.g));
+    parts.push(l.g);
   }
   const finalSpz = parts.length > 1 ? writeSpzGaussians(concatGaussians(parts)) : envSpz;
   await writeFile(join(dir, 'scene.spz'), finalSpz);

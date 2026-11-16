@@ -263,6 +263,8 @@ export interface ObjectAsset {
   error: string | null;
   /** Already moved to the environment's scale (composeScene), so a later compose leaves it be. */
   shifted?: boolean;
+  /** How it was seated (core/seat.ts): straightened by how much, moved how far, onto what. */
+  seat?: import('../core/seat.ts').SeatResult;
 }
 
 /** Every asset object: crop the object panorama at it, SAM 3D, thin, fit to the blockout, write objects/<id>.spz. */
