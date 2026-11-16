@@ -23,16 +23,46 @@ export interface CropView {
   box: [number, number, number, number];
 }
 
+/** How close to a wall (metres) an object's back - or two of its sides, in a corner - has to be to count as against it. */
+export const WALL_GAP = 0.2;
+
 /**
- * Which objects become separate 3D assets: the ones the layout marks key, else the most important
- * free-standing ones. Never flat things (rugs, water) or things standing on others; at most `max`.
+ * Against a wall with nothing showing behind it: its BACK (the side away from where it faces) within
+ * WALL_GAP of a wall it backs onto, or tucked into a corner (its footprint within WALL_GAP of two
+ * walls). Such a thing is painted into the panorama and becomes part of the environment's 3DGS - the
+ * one view the reconstruction has of it is the true one, as nobody walks behind it. Outdoors: none.
  */
-export function keyObjects(layout: Layout, max = 5): LayoutObject[] {
+export function wallBacked(o: LayoutObject, room: Layout['room']): boolean {
+  if (!room) return false;
+  const hw = room.width / 2, hd = room.depth / 2;
+  const yaw = (o.yaw * Math.PI) / 180;
+  // Front points along (sin yaw, cos yaw) in x, z (0 = south, +Z).
+  const back: [number, number] = [-Math.sin(yaw), -Math.cos(yaw)];
+  const fp = corners(o);
+  const xs = fp.map((p) => p[0]), zs = fp.map((p) => p[2]);
+  const near = {
+    east: hw - Math.max(...xs) <= WALL_GAP, west: Math.min(...xs) + hw <= WALL_GAP,
+    south: hd - Math.max(...zs) <= WALL_GAP, north: Math.min(...zs) + hd <= WALL_GAP,
+  };
+  // The wall it backs onto: the one the back faces (within ~25°).
+  const facing = back[0] > 0.9 ? 'east' : back[0] < -0.9 ? 'west' : back[1] > 0.9 ? 'south' : back[1] < -0.9 ? 'north' : null;
+  if (facing && near[facing]) return true;
+  return (near.east || near.west) && (near.north || near.south);
+}
+
+/**
+ * Which objects become separate 3D assets (SAM 3D): everything that stands out in the room - every
+ * free-standing thing not against a wall, the ones the layout marks key first, then by importance.
+ * Never flat things (rugs, water), things standing on others (they go with what they stand on) or
+ * things against a wall (painted into the panorama: see wallBacked). At most `max`.
+ */
+export function keyObjects(layout: Layout, max = 12): LayoutObject[] {
   const flat = new Set(['rug', 'road', 'water', 'fence']);
-  const ok = (o: LayoutObject) => !flat.has(o.type) && !o.on && o.size[1] > 0.25;
-  const marked = layout.objects.filter((o) => o.key && ok(o));
-  const pool = marked.length ? marked : layout.objects.filter(ok).sort((a, b) => importanceOf(layout, layout.objects.indexOf(b)) - importanceOf(layout, layout.objects.indexOf(a)));
-  return pool.slice(0, max);
+  const ok = (o: LayoutObject) => !flat.has(o.type) && !o.on && o.size[1] > 0.25 && !wallBacked(o, layout.room);
+  const rank = (o: LayoutObject) => (o.key ? 10 : 0) + importanceOf(layout, layout.objects.indexOf(o));
+  // Outdoors (no walls to tell the open floor by) only the marked ones, or the most important few.
+  const pool = layout.room ? layout.objects.filter(ok) : (layout.objects.some((o) => o.key && ok(o)) ? layout.objects.filter((o) => o.key && ok(o)) : layout.objects.filter(ok).slice().sort((a, b) => rank(b) - rank(a)).slice(0, 5));
+  return pool.sort((a, b) => rank(b) - rank(a)).slice(0, max);
 }
 
 /** Corners of an object's oriented box (world). */
@@ -221,12 +251,12 @@ export async function saveJson(path: string, v: unknown): Promise<void> {
 
 
 /**
- * Which objects become SAM 3D assets - the key objects and what stands on them - and so are left
+ * Which objects become SAM 3D assets - the ones in the open room (keyObjects) and what stands on them - and so are left
  * out of the environment's blockout altogether: the environment's panorama is painted without
  * them, so they are never in the room twice and nothing has to be erased. Things on a key object
  * beyond `max` are left out too (they would float where the key object was).
  */
-export function planObjects(layout: Layout, max = 8): { assets: LayoutObject[]; remove: Set<number> } {
+export function planObjects(layout: Layout, max = 12): { assets: LayoutObject[]; remove: Set<number> } {
   const keys = keyObjects(layout, max);
   const assets = [...keys];
   const remove = new Set(keys.map((o) => layout.objects.indexOf(o)));

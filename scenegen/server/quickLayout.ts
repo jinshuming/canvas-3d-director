@@ -62,7 +62,7 @@ World: metres, floor y = 0, +X east, -Z north, +Z south. A room is centred on th
 - Objects: 4-12 indoors, 4-15 outdoors, in DEPENDENCY ORDER (a thing that refers to another comes after it). Real sizes in metres. A concrete label with material and colour ("grey linen three-seat sofa"). Never people, characters, robots or animals - the scene is an empty place.
 - Placement by relation: against (ref = a wall; the object backs onto it and faces into the room), on (ref = the object it stands on), in_front_of / behind / left_of / right_of / near (ref = another object's id; left/right from that object's own point of view), or position (ref = '', x and z given). gap = clearance to the reference in metres (0.3-0.6 typical; 0 for against). x and z are used only for position (else 0).
 - facing: an object id or a wall the object turns to face, or ''.
-- key = true for the 2-5 objects that define the scene and should become separate, movable 3D objects (furniture pieces, a fountain, a car); false for small props, rugs, built-ins, and anything that belongs to the room itself.
+- key = true for the objects that define the scene (furniture pieces, a fountain, a car); false for small props, rugs, built-ins, and anything that belongs to the room itself. Indoors every free-standing thing in the open room becomes its own 3D object whatever key says (key only ranks it first); things placed against a wall are painted with the room.
 - Leave walking space. Pictures/video: copy what they show - the same room shape, the same objects where they stand - and take the style from them.
 - style: one-line summary, palette, materials, lighting (concrete: light direction, time of day, colour temperature).
 

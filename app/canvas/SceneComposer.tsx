@@ -74,7 +74,7 @@ export function SceneComposer({ node, rect, inputs, hasServerVideo, ui, onText, 
           <span className="cv-c2-model"><Icon name={gen ? 'sparkle' : 'camera'} size={16} />{gen ? '场景生成 · GPT-image + JST-2' : '场景重建 · COLMAP + JST-2'}</span>
           <span className="cv-c2-sep" />
           {gen
-            ? <button className={`cv-c2-opt ${d.objects ? 'on' : ''}`} onClick={() => patchDraft(node.id, { objects: !d.objects })} title="关键物体用 SAM 3D 单独生成"><Icon name="box" size={15} />SAM 3D 物体 · {d.objects ? '开' : '关'}</button>
+            ? <button className={`cv-c2-opt ${d.objects ? 'on' : ''}`} onClick={() => patchDraft(node.id, { objects: !d.objects })} title="房间中间的物体用 SAM 3D 单独生成；靠墙、背后不露的画进全景，随环境一起重建"><Icon name="box" size={15} />SAM 3D 物体 · {d.objects ? '开' : '关'}</button>
             : <span className="cv-c2-opt"><Icon name="video" size={15} />锚点全景 + 路径视角</span>}
           <span className="cv-spacer" />
           {d.error && <small className="cv-c2-err" title={d.error}>{d.error}</small>}
