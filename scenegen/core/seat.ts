@@ -81,7 +81,7 @@ export function supportTilt(g: Gaussians): { normal: [number, number, number]; t
 }
 
 /** Rotation taking unit vector n onto +Y (Rodrigues). */
-function rotationToUp(n: [number, number, number]): Mat3 {
+export function rotationToUp(n: [number, number, number]): Mat3 {
   const [x, y, z] = n;
   // axis = n × up = (-z, 0, x) normalised; angle = acos(y)
   const s = Math.hypot(x, z), c = y;

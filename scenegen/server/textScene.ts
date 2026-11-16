@@ -8,7 +8,8 @@
  *   scene       custom-pano at the capture pose with that scale → scene.spz in our world
  *   verify      floor height and depth agreement with the blockout
  */
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { horizontalScale, measureAlignment } from '../core/align.ts';
@@ -18,9 +19,10 @@ import { findCapturePoint } from '../core/capture.ts';
 import { toServiceC2W } from '../core/frame.ts';
 import type { CameraPose } from '../core/frame.ts';
 import { buildScene } from '../core/geometry.ts';
-import { concatGaussians, readSpzGaussians, scaleSpz, transformGaussians, writeSpzGaussians } from '../core/gaussians.ts';
-import type { Gaussians } from '../core/gaussians.ts';
-import { seatObjects } from './seatScene.ts';
+import { concatGaussians, readSpzGaussians, scaleSpz, writeSpzGaussians } from '../core/gaussians.ts';
+import { placeScene } from './seatScene.ts';
+import type { PlaceItem } from './seatScene.ts';
+import { MASK_GRID } from '../core/place.ts';
 import { depthImage, depthRange, renderEquirect, semanticImage, shadedImage } from '../core/render.ts';
 import { distanceToFloor, readSpz } from '../core/spz.ts';
 import type { Layout } from '../core/types.ts';
@@ -28,7 +30,7 @@ import { EYE_HEIGHT } from '../core/types.ts';
 import { scorePanoramas } from './alignScore.ts';
 import { autoFill, fillBudget } from './fill.ts';
 import type { PastJob } from './expand.ts';
-import { environmentLayout, generateObjects, planObjects } from './objects.ts';
+import { cropFor, decodeRgb, environmentLayout, generateObjects, paintedMask, planObjects } from './objects.ts';
 import type { ObjectAsset } from './objects.ts';
 import type { FillResult } from './fill.ts';
 import { Jst2Client, newSessionId } from './jst2.ts';
@@ -109,39 +111,45 @@ export async function renderConditions(layout: Layout, dir: string) {
 }
 
 /** The environment's measured scale, if it is off by enough to move the objects (and plausible). */
-const shiftOf = (envScale: number | null) => (envScale !== null && envScale > 0.7 && envScale < 1.4 && Math.abs(envScale - 1) > 0.02 ? envScale : null);
+export const shiftOf = (envScale: number | null) => (envScale !== null && envScale > 0.7 && envScale < 1.4 && Math.abs(envScale - 1) > 0.02 ? envScale : null);
 
 /**
- * Environment + objects into scene.spz (and each object moved to the environment's scale once - its
- * file rewritten, `shifted` set - so a later compose, after retrying a failed object, leaves it be).
+ * Environment + objects into scene.spz. Every object is placed from its source - SAM 3D's object as it
+ * came, `objects/<id>-sam.spz` (an older scene's placed file becomes its source the first time) - by
+ * seatScene.placeScene: cleaned, stood up, squared with its box, sized, seated, kept out of the walls
+ * and the other objects. From the source every time, so composing again after an expansion or a retry
+ * places the same way, and never compounds a move.
  */
-export async function composeScene(dir: string, layout: Layout, origin: [number, number, number], envSpz: Uint8Array, objects: ObjectAsset[], shift: number | null): Promise<Uint8Array> {
+export async function composeScene(dir: string, layout: Layout, capture: CameraPose, envSpz: Uint8Array, objects: ObjectAsset[], shift: number | null, onPlaced?: (suspect: string[]) => void): Promise<Uint8Array> {
   const env = readSpzGaussians(envSpz);
-  const parts = [env];
-  const loaded: Array<{ o: ObjectAsset; g: Gaussians; src: Layout['objects'][number] | undefined; changed: boolean }> = [];
+  const items: PlaceItem[] = [];
   for (const o of objects) {
-    if (!o.file) continue;
-    const g = readSpzGaussians(new Uint8Array(await readFile(join(dir, o.file))));
-    const src = layout.objects.find((x) => x.id === o.id);
-    let changed = false;
-    if (shift !== null && src && !o.shifted) {
-      const rel = [src.position[0] - origin[0], src.position[2] - origin[2]];
-      transformGaussians(g, [[1, 0, 0], [0, 1, 0], [0, 0, 1]], 1, [rel[0]! * (shift - 1), 0, rel[1]! * (shift - 1)]);
-      changed = true;
+    const obj = layout.objects.find((x) => x.id === o.id);
+    if (!o.file || !obj) continue;
+    const src = join(dir, `objects/${o.id}-sam.spz`);
+    if (!existsSync(src)) await copyFile(join(dir, o.file), src);
+    const g = readSpzGaussians(new Uint8Array(await readFile(src)));
+    // The painted object's silhouette in the crop SAM 3D saw, when the crop was painted here.
+    const view = cropFor(obj, capture);
+    let mask: Uint8Array | null = null;
+    const envCrop = join(dir, `objects/${o.id}-env.jpg`);
+    if (o.crop.endsWith('.png') && existsSync(envCrop) && existsSync(join(dir, o.crop))) {
+      const [before, after] = await Promise.all([decodeRgb(envCrop, view.size), decodeRgb(join(dir, o.crop), view.size)]).catch(() => [null, null]);
+      if (before && after) mask = paintedMask(before, after, view.size, o.box, MASK_GRID);
     }
-    o.shifted = shift !== null || o.shifted;
-    loaded.push({ o, g, src, changed });
+    items.push({ id: o.id, obj, g, crop: { pose: view.pose, fov: view.fov, mask } });
   }
-  // Upright and on what they stand on (the environment's real floor, or the object under them) -
-  // once per object, so a recompose after an expansion or a retry leaves the seated ones be.
-  const toSeat = loaded.filter((l) => !l.o.seat && l.src);
-  if (toSeat.length) {
-    const seats = seatObjects(env, toSeat.map((l) => ({ id: l.o.id, obj: l.src!, g: l.g })), origin[1]);
-    for (const l of toSeat) { const st = seats.get(l.o.id); if (st) { l.o.seat = st; l.changed = true; } }
-  }
-  for (const l of loaded) {
-    if (l.changed) await writeFile(join(dir, l.o.file!), writeSpzGaussians(l.g));
-    parts.push(l.g);
+  const placed = placeScene(env, items, layout, capture.position, shift);
+  onPlaced?.([...placed].filter(([, p]) => p.place.suspect).map(([id]) => id));
+  const parts = [env];
+  for (const o of objects) {
+    const p = placed.get(o.id);
+    if (!p || !o.file) continue;
+    o.place = p.place;
+    o.seat = p.seat;
+    delete o.shifted;
+    await writeFile(join(dir, o.file), writeSpzGaussians(p.g));
+    parts.push(p.g);
   }
   const finalSpz = parts.length > 1 ? writeSpzGaussians(concatGaussians(parts)) : envSpz;
   await writeFile(join(dir, 'scene.spz'), finalSpz);
@@ -173,7 +181,7 @@ export async function retryObjects(dir: string, deps: { sam3d: (image: Uint8Arra
     envScale = horizontalScale(readSpz(envSpz), renderEquirect(buildScene(envLayout), capture, 512, 256), { position: [0, 0, 0], yaw: capture.yaw });
   }
   p('compose', 'Composing the scene again');
-  const finalSpz = await composeScene(dir, layout, capture.position, envSpz, objects, shiftOf(envScale));
+  const finalSpz = await composeScene(dir, layout, capture, envSpz, objects, shiftOf(envScale));
   const measured = measureAlignment(readSpz(finalSpz), renderEquirect(buildScene(layout), capture, 256, 128), { position: [0, 0, 0], yaw: capture.yaw });
   const out: TextSceneResult = { ...result, pastJobs: [...(result.pastJobs ?? []), ...(deps.previousJob ? [deps.previousJob] : [])], objects, envScale, alignment: { ...measured, floorY: measured.floorY === null ? null : Math.round((measured.floorY + capture.position[1]) * 100) / 100 } };
   await writeFile(join(dir, 'result.json'), JSON.stringify(out, null, 2));
@@ -342,7 +350,8 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
   const envScale = objects.some((o) => o.file) ? horizontalScale(readSpz(envSpz), renderEquirect(buildScene(envLayout), c.capture, 512, 256), filePose) : null;
   const shift = shiftOf(envScale);
   if (shift !== null) p('objects', `The environment is ${Math.round(shift * 100)}% of the blockout's size: moving the objects to match`);
-  const finalSpz = await composeScene(dir, layout, origin, envSpz, objects, shift);
+  p('compose', 'Placing the objects: cleaned, stood up, squared with the blockout, seated, kept out of the walls and each other');
+  const finalSpz = await composeScene(dir, layout, c.capture, envSpz, objects, shift, (bad) => { if (bad.length) p('compose', `Does not fit its blockout box even placed (SAM 3D gave something else?): ${bad.join(', ')}`); });
 
   p('verify', 'Checking the scene against the blockout');
   const lowRes = renderEquirect(buildScene(layout), c.capture, 256, 128);
