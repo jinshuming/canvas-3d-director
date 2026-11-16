@@ -218,3 +218,33 @@ test('videoGen: OpenCV video cameras become level poses in our world; anchor and
   assert.equal(a.near.length, 2);
   assert.deepEqual(pathTargets(cams, a.anchor).map((c) => c.index), [2]);
 });
+
+test('objects in the open room go to SAM 3D, objects against a wall stay in the panorama', async () => {
+  const { planObjects, wallBacked } = await import('./objects.ts');
+  const room = { width: 5, depth: 4, height: 2.8, openings: [] };
+  const o = (id: string, type: string, size: [number, number, number], position: [number, number, number], yaw: number, extra: Record<string, unknown> = {}) =>
+    ({ id, type, label: id, size, position, yaw, ...extra });
+  const layout = {
+    room,
+    objects: [
+      // Backs onto the north wall (faces south, yaw 0): its back 5 cm off the wall.
+      o('bookshelf', 'bookshelf', [1.2, 2, 0.35], [0, 0, -2 + 0.175 + 0.05], 0, { key: true }),
+      // Tucked into the south-east corner.
+      o('plant', 'plant', [0.5, 1.2, 0.5], [2.5 - 0.3, 0, 2 - 0.3], 45),
+      // Its SIDE is by the west wall, its back open to the room: not against it.
+      o('armchair', 'armchair', [0.8, 0.9, 0.8], [-2.5 + 0.45, 0, 0], 180),
+      o('table', 'table', [1.4, 0.75, 0.8], [0.5, 0, 0.3], 0),
+      o('vase', 'vase', [0.2, 0.3, 0.2], [0.5, 0.75, 0.3], 0, { on: 'table' }),
+      o('book', 'book', [0.2, 0.05, 0.3], [0, 1, -1.6], 0, { on: 'bookshelf' }),
+      o('rug', 'rug', [2, 0.02, 1.5], [0.5, 0, 0.3], 0),
+    ],
+  } as unknown as Parameters<typeof planObjects>[0];
+  const [shelf, plant, chair] = layout.objects;
+  assert.equal(wallBacked(shelf!, room), true);
+  assert.equal(wallBacked(plant!, room), true);
+  assert.equal(wallBacked(chair!, room), false);
+  const ids = planObjects(layout).assets.map((a) => a.id).sort();
+  assert.deepEqual(ids, ['armchair', 'table', 'vase']);
+  // Outdoors nothing is against a wall.
+  assert.equal(wallBacked(shelf!, null as unknown as typeof room), false);
+});
