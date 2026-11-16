@@ -9,6 +9,7 @@ import { test } from 'node:test';
 import { runAgentTurn } from '../agent/loop.ts';
 import type { ChatItem } from '../agent/loop.ts';
 import { runTool } from '../agent/tools.ts';
+import { paintedBox } from './objects.ts';
 import type { AgentHost } from '../agent/tools.ts';
 import { findCapturePoint } from '../core/capture.ts';
 import { poseToC2W } from '../core/frame.ts';
@@ -180,4 +181,18 @@ test('fill budget grows with the space; the image prompt states sizes and forbid
   assert.match(p, /do not vault or raise the ceiling/);
   assert.match(p, /No people, characters/);
   assert.match(p, /not any people, characters or creatures in it/);
+});
+
+test('paintedBox: boxes what was painted, falls back to the blockout box when nothing was', () => {
+  const S = 200;
+  const before = new Uint8Array(S * S * 3).fill(120);
+  const after = new Uint8Array(before);
+  // The blockout box is 60..140 × 80..130; the painted object reaches higher and wider (within the area the edit may touch): 50..150 × 66..135.
+  for (let y = 66; y < 135; y++) for (let x = 50; x < 150; x++) after.set([30, 20, 10], (y * S + x) * 3);
+  const r = paintedBox(before, after, S, [60, 80, 140, 130]);
+  assert.ok(r.fromPaint);
+  assert.deepEqual(r.box, [50, 66, 150, 135]);
+  const none = paintedBox(before, before, S, [60, 80, 140, 130]);
+  assert.equal(none.fromPaint, false);
+  assert.deepEqual(none.box, [60, 80, 140, 130]);
 });

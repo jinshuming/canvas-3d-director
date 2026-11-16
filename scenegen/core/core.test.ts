@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import { horizontalScale } from './align.ts';
 import { compileCaption } from './caption.ts';
 import { findCapturePoint, frontYaw } from './capture.ts';
 import { townSquare, livingRoom } from './fixtures.ts';
@@ -173,4 +174,21 @@ test('depth range ignores what is seen through openings; openings render as no s
   assert.ok(win >= 0);
   const i = r.cls.findIndex((c) => c === win);
   assert.equal(d[i * 3], 0);
+});
+
+test('horizontalScale: a room rebuilt at 85% of the blockout reads as 0.85', () => {
+  const l = emptyLayout();
+  setRoom(l, { width: 8, depth: 6, height: 3 });
+  const pose = { position: [0.5, 1.5, -0.4] as [number, number, number], yaw: 30 };
+  // The "scene": points on the walls of the same room shrunk by 0.85 about the capture point.
+  const pts: number[] = [];
+  const k = 0.85;
+  for (let t = -1; t <= 1; t += 0.002) for (const y of [-0.4, -0.2, 0, 0.2, 0.4]) {
+    for (const [x, z] of [[4, t * 3], [-4, t * 3], [t * 4, 3], [t * 4, -3]] as const) pts.push((x - 0.5) * k, y, (z + 0.4) * k);
+  }
+  const n = pts.length / 3;
+  const points = { version: 2, count: n, positions: new Float32Array(pts), colors: new Uint8Array(n * 3), alphas: new Float32Array(n).fill(1) };
+  const r = renderEquirect(buildScene(l), pose, 256, 128);
+  const s = horizontalScale(points, r, { position: [0, 0, 0], yaw: pose.yaw });
+  assert.ok(s !== null && Math.abs(s - 0.85) < 0.02, `scale ${s}`);
 });

@@ -76,3 +76,43 @@ export function measureAlignment(points: SpzPoints, blockout: EquirectBuffers, p
     objectsWithin25: objN ? Math.round((objOk / objN) * 1000) / 1000 : 0,
   };
 }
+
+/**
+ * How big the environment came out against the blockout, horizontally: the median, over the
+ * directions near the horizon that hit a WALL in the blockout (not an object, an opening, the floor
+ * or the ceiling), of the scene's near-surface distance over the blockout's. The image model and
+ * JST-2 often build the room a little smaller or larger than drawn (measured: 0.88 on the café,
+ * with the floor height right); an object placed by the blockout against a wall then ends up inside
+ * or behind the scene's wall. null when too few directions see a wall (outdoors).
+ */
+export function horizontalScale(points: SpzPoints, blockout: EquirectBuffers, pose: CameraPose): number | null {
+  const { width: W, height: H } = blockout;
+  const b = basis(pose);
+  const o = pose.position;
+  const v0 = Math.floor(H * 0.42), v1 = Math.ceil(H * 0.58);
+  const buckets = new Map<number, number[]>();
+  for (let i = 0; i < points.count; i++) {
+    if (points.alphas[i]! < 0.35) continue;
+    const d = sub([points.positions[i * 3]!, points.positions[i * 3 + 1]!, points.positions[i * 3 + 2]!], o);
+    const dist = Math.hypot(...d);
+    if (dist < 0.05 || dist > 200) continue;
+    const [u, v] = dirToEquirect([d[0] / dist, d[1] / dist, d[2] / dist], W, H, b);
+    const iv = Math.round(v);
+    if (iv < v0 || iv > v1) continue;
+    const k = iv * W + (((Math.round(u) % W) + W) % W);
+    const bk = buckets.get(k) ?? [];
+    if (bk.length < 64) bk.push(dist);
+    buckets.set(k, bk);
+  }
+  const wall = new Set(blockout.classes.map((c, k) => (c === 'wall' ? k : -1)).filter((k) => k >= 0));
+  const ratios: number[] = [];
+  for (const [k, bk] of buckets) {
+    const bt = blockout.dist[k]!;
+    if (bk.length < 4 || !Number.isFinite(bt) || blockout.obj[k]! >= 0 || !wall.has(blockout.cls[k]!)) continue;
+    bk.sort((a, c) => a - c);
+    ratios.push(bk[Math.floor(bk.length * 0.1)]! / bt);
+  }
+  if (ratios.length < 20) return null;
+  ratios.sort((a, c) => a - c);
+  return ratios[Math.floor(ratios.length / 2)]!;
+}

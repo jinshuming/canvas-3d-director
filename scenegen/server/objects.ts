@@ -101,6 +101,57 @@ export function deadline<T>(work: Promise<T>, ms: number, what: string): Promise
   return Promise.race([work, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${what} timed out after ${Math.round(ms / 1000)} s`)), ms); })]).finally(() => clearTimeout(timer));
 }
 
+/** Decode an image to raw RGB at `size` × `size` (ffmpeg). */
+export function decodeRgb(file: string, size: number): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const p = spawn('ffmpeg', ['-v', 'error', '-i', file, '-vf', `scale=${size}:${size}`, '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']);
+    const chunks: Buffer[] = [];
+    let err = '';
+    p.stdout.on('data', (c: Buffer) => chunks.push(c));
+    p.stderr.on('data', (c: Buffer) => { err += c.toString(); });
+    p.on('error', reject);
+    p.on('close', (code) => (code === 0 ? resolve(new Uint8Array(Buffer.concat(chunks))) : reject(new Error(`ffmpeg decode failed: ${err.slice(0, 200)}`))));
+  });
+}
+
+/**
+ * The box of what was actually painted: where the painted crop differs from the empty one, inside
+ * the area the edit could touch. SAM 3D segments only what its box covers, and the painted object
+ * does not keep to the blockout's box (measured: a sofa's back and arms rose above it, and SAM 3D
+ * returned just the seat cushions). Shadows - a uniform darkening - do not count: with them the
+ * box reached the floor under a table and SAM 3D made a slab of it. Falls back to the blockout box
+ * when little changed.
+ */
+export function paintedBox(before: Uint8Array, after: Uint8Array, size: number, box: [number, number, number, number]): { box: [number, number, number, number]; fromPaint: boolean } {
+  const [x0, y0, x1, y1] = box;
+  const mx = (x1 - x0) * 0.15 + 8, my = (y1 - y0) * 0.15 + 8;
+  const ax0 = Math.max(0, Math.floor(x0 - mx)), ax1 = Math.min(size - 1, Math.ceil(x1 + mx));
+  const ay0 = Math.max(0, Math.floor(y0 - my)), ay1 = Math.min(size - 1, Math.ceil(y1 + my * 2));
+  // Changed pixels: a strong colour difference (contact shadows are mostly weaker).
+  const rows = new Uint32Array(size), cols = new Uint32Array(size);
+  let n = 0;
+  for (let y = ay0; y <= ay1; y++) for (let x = ax0; x <= ax1; x++) {
+    const i = (y * size + x) * 3;
+    const d = Math.max(Math.abs(after[i]! - before[i]!), Math.abs(after[i + 1]! - before[i + 1]!), Math.abs(after[i + 2]! - before[i + 2]!));
+    if (d <= 48) continue;
+    // A shadow only darkens what was there, by about the same factor in every channel: not the object.
+    const r = [0, 1, 2].map((c) => (after[i + c]! + 4) / (before[i + c]! + 4));
+    if (Math.max(...r) < 0.92 && Math.max(...r) - Math.min(...r) < 0.12) continue;
+    rows[y]!++; cols[x]!++; n++;
+  }
+  if (n < 0.2 * (x1 - x0) * (y1 - y0)) return { box, fromPaint: false };
+  // Ignore stray rows / columns: keep those with at least 3% of the area's span changed.
+  const span = (from: number, to: number, count: Uint32Array, need: number) => {
+    let a = -1, b = -1;
+    for (let k = from; k <= to; k++) if (count[k]! >= need) { if (a < 0) a = k; b = k; }
+    return [a, b] as const;
+  };
+  const [bx0, bx1] = span(ax0, ax1, cols, Math.max(2, (ay1 - ay0) * 0.03));
+  const [by0, by1] = span(ay0, ay1, rows, Math.max(2, (ax1 - ax0) * 0.03));
+  if (bx0 < 0 || by0 < 0) return { box, fromPaint: false };
+  return { box: [bx0, by0, bx1 + 1, by1 + 1], fromPaint: true };
+}
+
 export interface Sam3dResult { ply: Uint8Array; seconds: number; requestId: string }
 
 const SAM3D_URL = 'https://queue.fal.run/fal-ai/sam-3/3d-objects';
@@ -217,18 +268,22 @@ export async function generateObjects(layout: Layout, assets: LayoutObject[], pa
   return Promise.all(assets.map(async (o): Promise<ObjectAsset> => {
     const view = cropFor(o, capture);
     const crop = `objects/${o.id}-crop.${deps.paint ? 'png' : 'jpg'}`;
-    const base = { id: o.id, label: o.label, crop, box: view.box };
+    let base = { id: o.id, label: o.label, crop, box: view.box };
     try {
       if (deps.paint) {
         const envCrop = join(dir, `objects/${o.id}-env.jpg`), guideCrop = join(dir, `objects/${o.id}-guide.jpg`);
         await Promise.all([cropPanorama(panoPath, view, capture.yaw, envCrop), cropPanorama(deps.paint.guidePano, view, capture.yaw, guideCrop)]);
         const painted = await deps.paint.run({ image: new Uint8Array(await readFile(envCrop)), guide: new Uint8Array(await readFile(guideCrop)), size: view.size, box: view.box, label: o.label, style: deps.paint.style });
         await wf(join(dir, crop), painted);
+        // Prompt SAM 3D with the box of what was painted, not the blockout's (see paintedBox).
+        const [before, after] = await Promise.all([decodeRgb(envCrop, view.size), decodeRgb(join(dir, crop), view.size)]);
+        base = { ...base, box: paintedBox(before, after, view.size, view.box).box };
       } else await cropPanorama(panoPath, view, capture.yaw, join(dir, crop));
       // One retry: SAM 3D on fal fails now and then on the network, rarely twice.
       const image = new Uint8Array(await readFile(join(dir, crop)));
-      const r = await deps.sam3d(image, view.box).catch((e: Error) => { deps.onProgress?.(`${o.label}: SAM 3D failed (${e.message}), retrying`); return deps.sam3d(image, view.box); });
-      const g = thinGaussians(readPlyGaussians(r.ply), deps.maxGaussians ?? 150_000);
+      const r = await deps.sam3d(image, base.box).catch((e: Error) => { deps.onProgress?.(`${o.label}: SAM 3D failed (${e.message}), retrying`); return deps.sam3d(image, base.box); });
+      // Every Gaussian SAM 3D gives (~0.5M, a few MB as .spz); the cap only guards against a runaway.
+      const g = thinGaussians(readPlyGaussians(r.ply), deps.maxGaussians ?? 1_000_000);
       const fit = fitToBlockout(g, o, view.pose, capture.position);
       const file = `objects/${o.id}.spz`;
       await wf(join(dir, file), writeSpzGaussians(g));
