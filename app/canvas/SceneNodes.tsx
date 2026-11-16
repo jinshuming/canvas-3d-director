@@ -159,7 +159,10 @@ export function SceneGenCard({ node, inputs, onPatch, onSendToWorld }: Props) {
   );
 }
 
-/** 场景重建: a video in, frames + COLMAP poses → JST-2 posed-images → a scene out. */
+/**
+ * 场景重建: a video in, frames + COLMAP poses → a scene out: today an anchor panorama from the real
+ * frames plus JST-2 views at the video's cameras (videoGen.ts); posed-images once JST-2 has it.
+ */
 export function SceneReconCard({ node, onSendToWorld }: Props) {
   const { project, refresh } = useProject(node.projectId);
   const [video, setVideo] = useState<{ blob: Blob; url: string } | null>(null);
@@ -169,6 +172,8 @@ export function SceneReconCard({ node, onSendToWorld }: Props) {
   const job = project?.job;
   const running = Boolean(local && local.phase !== 'failed') || job?.status === 'running';
   const done = job?.status === 'done' && project?.result;
+  const gen = (project?.result as { mode?: string; verify?: { within25: number }; pathViews?: unknown[]; credits?: number; files?: { panorama?: string } } | null | undefined);
+  const generated = gen?.mode === 'generate';
 
   useEffect(() => {
     if (!done || !project) return;
@@ -193,12 +198,12 @@ export function SceneReconCard({ node, onSendToWorld }: Props) {
     <div className="cv-sg-card">
       {done && views ? (
         <div className="cv-sg-cover">
-          <img src={views.first} alt="" draggable={false} />
+          <img src={generated && gen?.files?.panorama ? file(project!.id, `out/${gen.files.panorama}`, job?.endedAt) : views.first} alt="" draggable={false} />
           <div className="cv-world-shade" />
           <div className="cv-sg-cover-info">
             <strong>{project!.title}</strong>
-            <small>关键帧注册 {views.stats.registered}/{views.stats.keyframes} · 重投影误差 {Number(views.stats.reprojErrorPx).toFixed(2)} px · {views.stats.selected} 个视角发给 JST-2</small>
-            <small className="cv-world-prompt">posed-images 接口未开放：当前为稀疏点云预览</small>
+            <small>关键帧注册 {views.stats.registered}/{views.stats.keyframes} · 重投影误差 {Number(views.stats.reprojErrorPx).toFixed(2)} px{generated ? ` · 沿视频路径生成 ${gen?.pathViews?.length ?? 0} 个视角 · ${gen?.credits ?? 0} 额度` : ` · ${views.stats.selected} 个视角发给 JST-2`}</small>
+            <small className="cv-world-prompt">{generated ? `锚点全景（视频帧拼接 + 补全）建场景 · 与视频一致 ${Math.round((gen?.verify?.within25 ?? 0) * 100)}%` : 'posed-images 接口未开放：当前为稀疏点云预览'}</small>
           </div>
         </div>
       ) : (

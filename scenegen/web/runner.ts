@@ -32,7 +32,7 @@ export async function generateScene(projectId: string, inputs: SceneInputs, onSt
   return api.generate(projectId, {});
 }
 
-/** Video → poses (COLMAP) → posed-images → scene. */
+/** Video → poses (COLMAP) → scene (the server picks the route: generate today, posed-images later). */
 export async function reconstructScene(projectId: string, video: Blob, onStatus: (s: RunStatus) => void): Promise<Job> {
   onStatus({ phase: 'uploading', message: '上传视频', progress: 0.01 });
   await api.video(projectId, video);
