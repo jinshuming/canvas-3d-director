@@ -6,7 +6,8 @@ import { Readable } from 'node:stream';
 import { extname, join, normalize, sep } from 'node:path';
 import type { Plugin } from 'vite';
 
-import type { StageDoc } from '../../src/stage/types.ts';
+import { normalizeLighting } from '../../src/stage/lighting.ts';
+import type { StageDoc, StageLighting, StageSceneRelight } from '../../src/stage/types.ts';
 import { AGENT_INSTRUCTIONS } from '../shared/agentPrompt.ts';
 import { relayResponses } from './openaiRelay.ts';
 import type { TurnBody } from './openaiRelay.ts';
@@ -24,6 +25,15 @@ import { copyWorld, newWorld, readWorld, storableChat, summarize, WORLD_ID, worl
  * they produce are downloaded into `dataDir/files` straight away, because
  * Viggle's signed URLs expire in 1-3 hours and a stage must reopen next week.
  */
+
+/** A scene's relight box from the scene generator, every number checked; anything else is none. */
+function sceneRelight(v: unknown): StageSceneRelight | null {
+  const r = v as StageSceneRelight | null | undefined;
+  const vec = (a: unknown) => Array.isArray(a) && a.length === 3 && a.every((x) => typeof x === 'number' && Number.isFinite(x));
+  if (!r || typeof r.strength !== 'number' || !Number.isFinite(r.strength) || !vec(r.bounds?.min) || !vec(r.bounds?.max)) return null;
+  return { strength: Math.min(1, Math.max(0, r.strength)), bounds: { min: r.bounds.min, max: r.bounds.max } };
+}
+
 export interface DirectorServerOptions {
   dataDir: string;
   apiKey: string | undefined;
@@ -305,7 +315,12 @@ export function directorServer(opts: DirectorServerOptions): Plugin {
     const base = (parent?.name ?? 'Scene').replace(/ · 补全\d+$/, '');
     library.scenes.unshift({
       id, name: `${base} · 补全${fills}`.slice(0, 60), url, panoramaUrl: parent?.panoramaUrl ?? null, parentId: f.sceneId,
-      viggle: { sessionId: f.sessionId, batchIds: f.batchIds }, createdAt: new Date().toISOString(),
+      viggle: { sessionId: f.sessionId, batchIds: f.batchIds },
+      // The rebuild is the scene alone, in the session's frame: the objects, light and relight box are the parent's.
+      ...(parent?.objectsUrl ? { objectsUrl: parent.objectsUrl } : {}),
+      ...(parent?.lighting ? { lighting: parent.lighting } : {}),
+      ...(parent?.relight ? { relight: parent.relight } : {}),
+      createdAt: new Date().toISOString(),
     });
     done(job, id);
   }
@@ -497,7 +512,7 @@ export function directorServer(opts: DirectorServerOptions): Plugin {
     // A scene from the scene generator (scenegen/): its files are copied in, and a generated
     // scene keeps its Viggle session so 扩展场景 can still fill it.
     if (p === '/api/library/import-scene' && m === 'POST') {
-      const b = await readJson(req) as { name?: string; dir?: string; spz?: string; panorama?: string | null; layout?: string | null; viggle?: { sessionId: string; batchIds: string[] } | null; source?: unknown };
+      const b = await readJson(req) as { name?: string; dir?: string; spz?: string; objects?: string | null; panorama?: string | null; layout?: string | null; viggle?: { sessionId: string; batchIds: string[] } | null; lighting?: Partial<StageLighting> | null; relight?: StageSceneRelight | null; source?: unknown };
       const allowed = join(opts.dataDir, 'scenegen') + sep;
       const src = (f: string | null | undefined) => {
         if (!f || !b.dir) return null;
@@ -516,10 +531,18 @@ export function directorServer(opts: DirectorServerOptions): Plugin {
       const layout = src(b.layout);
       let layoutUrl: string | undefined;
       if (layout) { await copyFile(layout, join(filesDir, `${id}-layout.json`)); layoutUrl = `/files/${id}-layout.json`; }
+      // Its objects, a second splat in the same frame as the scene file.
+      const objects = src(b.objects);
+      let objectsUrl: string | undefined;
+      if (objects) { await copyFile(objects, join(filesDir, `${id}-objects.spz`)); objectsUrl = `/files/${id}-objects.spz`; }
+      const relight = sceneRelight(b.relight);
       const scene: LibraryScene = {
         id, name: String(b.name ?? 'Generated scene').slice(0, 60), url: `/files/${id}.spz`, panoramaUrl,
         viggle: b.viggle && Array.isArray(b.viggle.batchIds) ? { sessionId: String(b.viggle.sessionId), batchIds: b.viggle.batchIds.map(String) } : null,
         ...(layoutUrl ? { layoutUrl } : {}),
+        ...(objectsUrl ? { objectsUrl } : {}),
+        ...(b.lighting ? { lighting: normalizeLighting(b.lighting) } : {}),
+        ...(relight ? { relight } : {}),
         createdAt: new Date().toISOString(),
       };
       library.scenes.unshift(scene);

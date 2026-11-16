@@ -31,6 +31,8 @@ import type { Plugin } from 'vite';
 import { findCapturePoint } from '../core/capture.ts';
 import { compileCaption } from '../core/caption.ts';
 import { checkLayout } from '../core/layout.ts';
+import { concatGaussians, readSpzGaussians, scaleSpz, transformGaussians, writeSpzGaussians } from '../core/gaussians.ts';
+import type { Gaussians } from '../core/gaussians.ts';
 import type { Layout } from '../core/types.ts';
 import { emptyLayout } from '../core/types.ts';
 import { relayResponses } from '../../app/server/openaiRelay.ts';
@@ -47,6 +49,72 @@ import { expandScene } from './expand.ts';
 import { renderConditions, retryObjects, textToScene } from './textScene.ts';
 import { extractKeyframes, readKeyframe } from './keyframes.ts';
 import { videoPipelineAvailable, videoToScene } from './videoScene.ts';
+
+
+/**
+ * What the director's library takes for a finished scene (POST /api/library/import-scene).
+ *
+ *  - The scene file is the ENVIRONMENT alone, in the frame of its JST-2 session: the director fills a
+ *    scene's gaps by asking that session for views at points in the file's frame and swapping in the
+ *    rebuild, so the file has to be in the session's units (it measures the scale itself, from the
+ *    floor). Scenes built at 1 unit = 1 (`sessionInUnits`) are stored here in metres: scaled back.
+ *  - The SAM 3D objects go as a second splat in that same frame, so a fill - which rebuilds the
+ *    environment only - keeps them.
+ *  - The light chosen in the scene editor goes as the director's StageLighting, and how far it
+ *    re-colours the scene as a box round the room, in stage metres (floor y = 0, capture point x = z = 0).
+ */
+async function exportFiles(proj: Project, out: string): Promise<Record<string, unknown>> {
+  const r = proj.result as {
+    sessionId?: string; batchIds?: string[]; metersPerUnit?: number; sessionInUnits?: boolean;
+    files: { scene: string; environment?: string; panorama?: string; layout?: string };
+    objects?: Array<{ file?: string | null }>;
+  };
+  const unit = r.sessionInUnits && r.metersPerUnit && r.metersPerUnit > 0 ? r.metersPerUnit : 1;
+  await mkdir(join(out, 'export'), { recursive: true });
+  const toSession = (g: Gaussians) => (unit === 1 ? g : transformGaussians(g, [[1, 0, 0], [0, 1, 0], [0, 0, 1]], 1 / unit, [0, 0, 0]));
+  const objectFiles = proj.kind === 'text' && r.files.environment ? (r.objects ?? []).flatMap((o) => (o.file && existsSync(join(out, o.file)) ? [o.file] : [])) : [];
+  const envFile = objectFiles.length ? r.files.environment! : r.files.environment && existsSync(join(out, r.files.environment)) && !(r.objects ?? []).length ? r.files.environment : r.files.scene;
+  const env = new Uint8Array(await readFile(join(out, envFile)));
+  await writeFile(join(out, 'export/scene.spz'), unit === 1 ? env : scaleSpz(env, 1 / unit));
+  let objects: string | null = null;
+  if (objectFiles.length) {
+    const parts = await Promise.all(objectFiles.map(async (f) => readSpzGaussians(new Uint8Array(await readFile(join(out, f))))));
+    await writeFile(join(out, 'export/objects.spz'), writeSpzGaussians(toSession(concatGaussians(parts))));
+    objects = 'export/objects.spz';
+  }
+  const l = proj.lighting as Record<string, unknown> | null | undefined;
+  const num = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
+  const lighting = l ? {
+    ...(typeof l.preset === 'string' ? { preset: l.preset } : {}),
+    azimuth: num(l.azimuth, 20), elevation: num(l.elevation, 60), intensity: num(l.intensity, 2), color: typeof l.color === 'string' ? l.color : '#ffffff',
+    ambient: num(l.ambient, 0.6), shadows: num(l.shadows, 0.8), relight: num(l.relight, 1),
+  } : null;
+  let relight: { strength: number; bounds: { min: number[]; max: number[] } } | null = null;
+  if (l) {
+    const strength = Math.max(0, Math.min(1, num(l.scene, 0)));
+    const layout = proj.layout;
+    const c = layout.capture?.position;
+    if (proj.kind === 'text' && c && layout.room) {
+      // The room, 30 cm past its walls; the capture point at x = z = 0, the floor at y = 0.
+      const { width: w, depth: d, height: h } = layout.room;
+      relight = { strength, bounds: { min: [-w / 2 - c[0] - 0.3, -0.3, -d / 2 - c[2] - 0.3], max: [w / 2 - c[0] + 0.3, h + 0.3, d / 2 - c[2] + 0.3] } };
+    } else if (proj.kind === 'text' && c) {
+      const s = Math.min(15, layout.ground.size / 2);
+      relight = { strength, bounds: { min: [-s - c[0], -0.5, -s - c[2]], max: [s - c[0], 8, s - c[2]] } };
+    } else {
+      relight = { strength, bounds: { min: [-8, -0.5, -8], max: [8, 5, 8] } };
+    }
+  }
+  return {
+    spz: 'export/scene.spz',
+    objects,
+    panorama: r.files.panorama ?? null,
+    layout: r.files.layout ?? null,
+    viggle: r.sessionId && r.batchIds?.length ? { sessionId: r.sessionId, batchIds: r.batchIds } : null,
+    lighting,
+    relight,
+  };
+}
 
 export interface ScenegenOptions {
   dataDir: string;
@@ -416,16 +484,7 @@ export function scenegenServer(opts: ScenegenOptions): Plugin {
     if (action === '/export' && m === 'POST') {
       if (!proj.result) throw new HttpError(400, 'Generate the scene first.');
       const out = join(pdir(proj.id), 'out');
-      const r = proj.result as { sessionId: string; batchIds: string[]; files: { scene: string; panorama?: string; layout?: string } };
-      const body = {
-        name: proj.title,
-        dir: out,
-        spz: r.files.scene,
-        panorama: r.files.panorama ?? null,
-        layout: r.files.layout ?? null,
-        viggle: proj.kind === 'text' ? { sessionId: r.sessionId, batchIds: r.batchIds } : null,
-        source: { kind: proj.kind, projectId: proj.id },
-      };
+      const body = { name: proj.title, dir: out, ...await exportFiles(proj, out), source: { kind: proj.kind, projectId: proj.id } };
       const resp = await fetch(`${base()}/api/library/import-scene`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       const out2 = await resp.json().catch(() => null) as { id?: string; error?: { message?: string } } | null;
       if (!resp.ok || !out2?.id) throw new HttpError(502, out2?.error?.message ?? `The director refused the import (${resp.status}).`);

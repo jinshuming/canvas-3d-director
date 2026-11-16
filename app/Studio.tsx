@@ -19,7 +19,7 @@ import { LibraryPanel } from './LibraryPanel.tsx';
 import type { Selection } from './ops.ts';
 import { addClip, addShot, clamp, uid, upsertKey } from './ops.ts';
 import type { GenJob, LibraryCharacter, LibraryMotion, LibraryScene } from './shared/library.ts';
-import { H3_ASPECT, H3_MAX_SECONDS, h3Duration } from './shared/library.ts';
+import { H3_ASPECT, H3_MAX_SECONDS, h3Duration, sceneFromLibrary } from './shared/library.ts';
 import { Timeline } from './Timeline.tsx';
 import { linkProps } from './router.ts';
 import type { WorldChat } from './shared/world.ts';
@@ -110,7 +110,8 @@ function StudioEditor({ stageId, nodeId, live, agentModel, initialChat, fresh, c
 
   // ── Library actions ──────────────────────────────────────────────────────
   const useScene = (s: LibraryScene) => {
-    update((d) => ({ ...d, scene: { name: s.name, url: s.url, placement: null, viggle: s.viggle, panoramaUrl: s.panoramaUrl } }));
+    // A scene made with a light brings it to a world that has none yet.
+    update((d) => ({ ...d, scene: sceneFromLibrary(s), ...(!d.lighting && s.lighting ? { lighting: s.lighting } : {}) }));
     say(`场景：${s.name}（首次加载会自动测量地面和比例）`);
   };
 

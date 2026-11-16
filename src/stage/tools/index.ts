@@ -639,7 +639,11 @@ export const STAGE_TOOLS: StageTool[] = [
     input_schema: { type: 'object', properties: { scene: { type: 'string' } }, required: ['scene'] },
     async run(i, host) {
       const a = await findAsset(host, 'scene', i.scene);
-      host.update((d) => ({ ...d, scene: { name: a.name, url: a.url, placement: null, viggle: a.viggle ?? null, panoramaUrl: a.panoramaUrl ?? null } }));
+      host.update((d) => ({
+        ...d,
+        scene: { name: a.name, url: a.url, placement: null, viggle: a.viggle ?? null, panoramaUrl: a.panoramaUrl ?? null, ...(a.objectsUrl ? { objectsUrl: a.objectsUrl } : {}), ...(a.relight ? { relight: a.relight } : {}) },
+        ...(!d.lighting && a.lighting ? { lighting: a.lighting } : {}),
+      }));
       const r = host.renderer;
       if (r) { r.setDoc(host.getDoc()); await settle(r); }
       return ok({ scene: a.name, note: 'Call get_world_layout to see where the floor is.' });
