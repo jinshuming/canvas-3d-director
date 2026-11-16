@@ -354,7 +354,7 @@ function RefGallery({ project, result, stamp }: { project: Project; result: GenR
         </div>
       </section>
       {!!result.candidates?.length && <section>
-        <h4>③ 全景图候选 <span>选对齐分最高、且没有人物的一张</span></h4>
+        <h4>③ 全景图候选 <span>先画 1 张：对齐分 ≥ 0.8 且没有人物就用；不够再画 2 张，选没有人物、对齐分最高的一张</span></h4>
         <div className="se-ref-row">
           {result.candidates.map((c, i) => fig(c.file, `候选 ${i + 1}${i === result.chosen ? ' · 选中' : ''}`, `对齐分 ${c.objects?.toFixed(2) ?? '—'}${c.people?.prominent ? ' · 有人物' : ''}`, { wide: true, on: i === result.chosen }))}
         </div>

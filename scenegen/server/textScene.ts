@@ -166,7 +166,7 @@ export async function retryObjects(dir: string, deps: { sam3d: (image: Uint8Arra
   return out;
 }
 
-export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst2Client; provider: PanoProvider; prompt?: string; styleImage?: { bytes: Uint8Array; mime: string }; maxFills?: number | 'auto'; vision?: PeopleCheck; candidates?: number;
+export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst2Client; provider: PanoProvider; prompt?: string; styleImage?: { bytes: Uint8Array; mime: string }; maxFills?: number | 'auto'; vision?: PeopleCheck; /** Keep the first panorama whose alignment with the blockout reaches this (0-1, default 0.8). */ goodEnough?: number;
   /** Generate key objects separately (SAM 3D) and the environment without them. Off: one 3DGS of everything. */
   objects?: { sam3d: (image: Uint8Array, box: [number, number, number, number]) => Promise<{ ply: Uint8Array; seconds: number }>; paint: (input: { image: Uint8Array; guide: Uint8Array; size: number; box: [number, number, number, number]; label: string; style?: string }) => Promise<Uint8Array> }; signal?: AbortSignal; onProgress?: Progress }): Promise<TextSceneResult> {
   const p = deps.onProgress ?? (() => {});
@@ -200,18 +200,25 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
   // How the panorama is painted (A/B-tested 2026-11-15, docs/SCENEGEN_DESIGN.md): the depth map AND the
   // clay render, pixel-aligned, and NOT the user's picture - with it GPT-image-2 copies the picture's
   // composition and ignores the blockout (alignment 0.05-0.08 against 0.55-0.64 without). The picture's
-  // look still arrives, as the agent's style text. Several candidates are painted at once and the one
-  // that follows the blockout best, with no life-size figure in it, is kept.
+  // look still arrives, as the agent's style text.
+  //
+  // Painted ON DEMAND: one first, scored against the blockout (edge alignment above chance, 0-1,
+  // absolute per image) and checked for life-size figures; kept if it is good enough. Otherwise two
+  // more at once, and the best clean one of the three is kept; three with a figure in each get one
+  // last pair. The same images go on scoring against each other: picking the best of three took
+  // alignment from 0.67 to 0.84 on one café, but most first paintings already clear the bar.
   const many = deps.provider.id === 'openai-image';
-  const n = many ? Math.max(1, deps.candidates ?? 3) : 1;
+  const goodEnough = deps.goodEnough ?? 0.8;
+  const batches = many ? [1, 2, 2] : [1];
   const geometry = geometryNote(envLayout, c.capture);
   const paint = () => deps.provider.generate({ prompt, depth: c.depth, semantic: c.semantic, shaded: c.shaded, geometry, withClay: many, styleImage: many ? undefined : deps.styleImage, signal: deps.signal, onProgress: () => {} });
   await mkdir(join(dir, 'candidates'), { recursive: true });
   const candidates: PanoCandidate[] = [];
   let panoAttempts = 0;
   let chosen: { pano: Awaited<ReturnType<typeof paint>>; index: number } | null = null;
-  for (let round = 0; round < 2 && !chosen; round++) {
-    p('pano', `Painting ${n} panorama candidates (${deps.provider.label})`);
+  const kept: Array<{ pano: Awaited<ReturnType<typeof paint>>; index: number }> = [];
+  for (const [round, n] of batches.entries()) {
+    p('pano', round === 0 ? `Painting the panorama (${deps.provider.label})` : `Painting ${n} more panorama candidate${n > 1 ? 's' : ''}`);
     const painted = await Promise.all(Array.from({ length: n }, () => paint()));
     const start = candidates.length;
     panoAttempts += n;
@@ -221,29 +228,35 @@ export async function textToScene(layout: Layout, dir: string, deps: { jst2: Jst
       await writeFile(file, pano.bytes);
       candidates.push({ file: `candidates/${file.split('/').pop()}`, objects: null, shell: null, people: null });
     }
-    p('pano', 'Scoring the candidates against the blockout and checking for figures');
+    p('pano', 'Scoring against the blockout and checking for figures');
     const [scores, checks] = await Promise.all([
-      n > 1 ? scorePanoramas(join(dir, 'semantic.png'), candidates.slice(start).map((x) => join(dir, x.file))) : Promise.resolve(null),
+      many ? scorePanoramas(join(dir, 'semantic.png'), candidates.slice(start).map((x) => join(dir, x.file))) : Promise.resolve(null),
       Promise.all(painted.map((x) => (deps.vision ? deps.vision(x.bytes).catch(() => null) : Promise.resolve(null)))),
     ]);
-    painted.forEach((_, i) => {
+    painted.forEach((pano, i) => {
       const cand = candidates[start + i]!;
       if (scores) { cand.objects = scores[i]!.objects; cand.shell = scores[i]!.shell; }
       cand.people = checks[i] ?? null;
+      kept.push({ pano, index: start + i });
     });
-    const clean = painted.map((pano, i) => ({ pano, index: start + i })).filter(({ index }) => !candidates[index]!.people?.prominent);
-    if (clean.length) chosen = clean.reduce((a, b) => ((candidates[b.index]!.objects ?? -1) > (candidates[a.index]!.objects ?? -1) ? b : a));
-    else p('pano', `Every candidate has a figure in it (${candidates[start]!.people?.note ?? ''}): painting again`);
+    const clean = kept.filter(({ index }) => !candidates[index]!.people?.prominent);
+    const best = clean.length ? clean.reduce((a, b) => ((candidates[b.index]!.objects ?? -1) > (candidates[a.index]!.objects ?? -1) ? b : a)) : null;
+    const score = best ? candidates[best.index]!.objects : null;
+    const last = round === batches.length - 1;
+    // Good enough (or no scorer to tell: keep the first clean one); after the second round, the best
+    // clean one whatever its score; a figure in every one painted so far: paint again.
+    if (best && (score === null || score >= goodEnough || round >= 1)) { chosen = best; break; }
+    if (best) p('pano', `Alignment ${score!.toFixed(2)} is under ${goodEnough}: painting more to choose from`);
+    else if (!last) p('pano', `A figure in every candidate so far (${candidates[start]!.people?.note ?? ''}): painting again`);
   }
-  // Two rounds with a figure in every candidate: keep the best-aligned one anyway, and say so.
+  // A figure in every candidate: keep the best-aligned one anyway, and say so.
   if (!chosen) {
-    const all = candidates.map((_, index) => index);
-    const index = all.reduce((a, b) => ((candidates[b]!.objects ?? -1) > (candidates[a]!.objects ?? -1) ? b : a));
-    chosen = { pano: { bytes: new Uint8Array(await readFile(join(dir, candidates[index]!.file))), mime: candidates[index]!.file.endsWith('.png') ? 'image/png' : 'image/jpeg' }, index };
+    const index = candidates.map((_, i) => i).reduce((a, b) => ((candidates[b]!.objects ?? -1) > (candidates[a]!.objects ?? -1) ? b : a));
+    chosen = kept.find((k) => k.index === index)!;
   }
   const pano = chosen.pano;
   const panoCheck = candidates[chosen.index]!.people;
-  p('pano', `Kept candidate ${chosen.index + 1} of ${candidates.length}${candidates[chosen.index]!.objects !== null ? ` (alignment ${candidates[chosen.index]!.objects!.toFixed(2)})` : ''}`);
+  p('pano', `Kept candidate ${chosen.index + 1} of ${candidates.length} painted${candidates[chosen.index]!.objects !== null ? ` (alignment ${candidates[chosen.index]!.objects!.toFixed(2)})` : ''}`);
   const panoName = pano.mime === 'image/png' ? 'panorama.png' : 'panorama.jpg';
   await writeFile(join(dir, panoName), pano.bytes);
   lap('pano');
