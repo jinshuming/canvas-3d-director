@@ -56,7 +56,20 @@ npm run typecheck
 | `../app/canvas/SceneNodes.tsx` | 画布上的「场景生成」「场景重建」节点：每个节点对应一个 scenegen 项目 |
 | `../app/server/openaiRelay.ts` | 导演台 agent 和场景 agent 共用的 OpenAI Responses 流式转发 |
 
-数据在 `.data/scenegen/projects/<id>/`。导出时调用导演台新加的 `POST /api/library/import-scene`，复制 `.spz`、全景图和 `layout.json`。
+数据在 `.data/scenegen/projects/<id>/`。
+
+## 物体落座、重打光、送到导演台
+
+- **落座**（`core/seat.ts`、`server/seatScene.ts`）：SAM 3D 物体只做旋转和平移，不拉伸。底面倾斜 0.5°–20° 的会被扶正。落地物体放到在拍摄点下测出的房间地面上（取最密的 1 cm 高斯层，允许 ±8 cm 的局部起伏）。架高的物体用 Viggle Splat Engine 的碰撞体（PINOC 的占据栅格算法）找支撑面。`on` 在别的物体上的（如书桌上的台灯）放到那个物体的顶面上。
+- **重打光**（编辑器「光照」，仿 Atlas Relight）：
+  - 预设、光的方向 / 高度 / 强度 / 颜色、环境光、影子深浅、场景受光、角色受光；
+  - 用 Splat Engine 的 `SplatRelight` 渲染：环境的接收体裁到房间盒子（墙外 30 cm），所以没有方形的色块边；
+  - 设置存在项目的 `lighting` 上。
+- **送到导演台**（`POST /projects/:id/export` → 导演台 `POST /api/library/import-scene`）：
+  - 场景文件只含**环境**，并换回 JST-2 会话的单位（`sessionInUnits` 的场景要除以 metersPerUnit）。导演台从地面自己测比例，「扩展场景」按文件坐标向同一个会话要新视角。
+  - SAM 3D 物体合成**另一个 splat**（`objectsUrl`），坐标系相同，用场景的 placement 挂载。导演台补全只重建环境，物体会被继承下来。
+  - 光照成为世界的 `StageLighting`；场景受光和房间盒子成为 `scene.relight`（单位是导演台的米，地面 y = 0）。
+  - 视频场景也会带上 Viggle 会话。
 
 ## 坐标约定（实测，2026-11-15）
 

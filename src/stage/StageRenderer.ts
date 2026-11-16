@@ -12,7 +12,7 @@ import { DEFAULT_HEIGHT, STEP_FRACTION, StageColliders } from './collider.js';
 import { cutWithin, editCamera } from './cuts.js';
 import { sampleTrack, trackTravel } from './clips.js';
 import { sampleMoves } from './moves.js';
-import type { StageCharacter, StageDoc, StageLighting, StagePlacement, StageShot, Vec3Tuple } from './types.js';
+import type { StageCharacter, StageDoc, StageLighting, StagePlacement, StageSceneRelight, StageShot, Vec3Tuple } from './types.js';
 
 /** What the viewport shows: the free editing camera, a shot's camera, or a fixed camera (an agent looking somewhere). */
 /** Metres from the capture point the scene is relit (and receives shadows) out to: as far as a panorama is reconstructed well. */
@@ -101,6 +101,14 @@ export class StageRenderer {
   /** What has been handed to `relight` (a target is added once; the component drops one whose entity goes). */
   private readonly relit = new WeakSet<object>();
   private lighting: StageLighting | null = null;
+  /** The scene's objects (StageScene.objectsUrl): a second splat mounted exactly like the scene. */
+  private objects: Environment | null = null;
+  private objectsUrl: string | null = null;
+  private objectsTicket = 0;
+  /** The placement the scene is mounted with, for the objects to follow. */
+  private placement: StagePlacement | null = null;
+  /** How far the light may re-colour the scene and its objects, and where (StageScene.relight). */
+  private sceneRelight: StageSceneRelight | null = null;
 
   /** Overlay drawing: which character to ring, which shot's path to draw. */
   private selectedCharacter: string | null = null;
@@ -143,6 +151,7 @@ export class StageRenderer {
     if (this.destroyed) return;
     this.doc = doc;
     this.syncScene(doc);
+    this.syncObjects(doc);
     this.syncCharacters(doc);
     this.syncLighting(doc.lighting ?? null);
     for (const c of doc.characters) for (const clip of c.clips) void this.ensureClip(clip.url);
@@ -341,6 +350,7 @@ export class StageRenderer {
     for (const l of this.characters.values()) l.character?.destroy();
     this.characters.clear();
     this.env?.destroy();
+    this.objects?.destroy();
     this.scene.destroy();
   }
 
@@ -348,6 +358,7 @@ export class StageRenderer {
 
   private syncScene(doc: StageDoc): void {
     const url = doc.scene?.url ?? null;
+    this.sceneRelight = doc.scene?.relight ?? null;
     if (url === this.envUrl) {
       // Same file, placement edited by hand: re-mount it.
       if (this.env && doc.scene?.placement) {
@@ -371,6 +382,7 @@ export class StageRenderer {
     const t = placeWalkScene(first);
     // Loaded already mounted by `first`: not a change when the doc says so too.
     if (given) this.mountedKey = JSON.stringify(given);
+    this.placement = first;
     this.sceneLoading = true;
     this.emitState();
     Environment.load(this.scene, url, { rotation: t.rotation, position: t.position, scale: t.scale, filename })
@@ -412,10 +424,44 @@ export class StageRenderer {
 
   private mount(env: Environment, placement: StagePlacement): void {
     this.mountedKey = JSON.stringify(placement);
-    const { position: p, rotation: r, scale: k } = placeWalkScene(placement);
-    env.entity.setPosition(p.x, p.y, p.z);
-    env.entity.setEulerAngles(r.x, r.y, r.z);
-    env.entity.setLocalScale(k, k, k);
+    this.placement = placement;
+    for (const e of [env, this.objects]) {
+      if (!e) continue;
+      const { position: p, rotation: r, scale: k } = placeWalkScene(placement);
+      e.entity.setPosition(p.x, p.y, p.z);
+      e.entity.setEulerAngles(r.x, r.y, r.z);
+      e.entity.setLocalScale(k, k, k);
+    }
+  }
+
+  /**
+   * The scene's objects: loaded with the placement the scene has now and moved with it after (the scene
+   * measures its floor when it first loads). Shown, relit and shadowed like the scene; not in its
+   * collider, which is built from the scene file alone.
+   */
+  private syncObjects(doc: StageDoc): void {
+    const url = doc.scene?.objectsUrl ?? null;
+    if (url === this.objectsUrl) return;
+    this.objectsUrl = url;
+    const ticket = ++this.objectsTicket;
+    this.objects?.destroy();
+    this.objects = null;
+    if (!url || !doc.scene) return;
+    const filename = filenameOf(url);
+    const t = placeWalkScene(this.placement ?? doc.scene.placement ?? { upright: isUprightFile(filename), scale: 1, floor: 0, start: [0, 0] });
+    Environment.load(this.scene, url, { rotation: t.rotation, position: t.position, scale: t.scale, filename })
+      .then((objects) => {
+        if (ticket !== this.objectsTicket || this.destroyed) { objects.destroy(); return; }
+        this.objects = objects;
+        if (this.env && this.placement) this.mount(this.env, this.placement);
+        this.attachRelightTargets();
+        this.emitState();
+      })
+      .catch((e: unknown) => {
+        if (ticket !== this.objectsTicket) return;
+        this.errors.push(`场景物体：${message(e)}`);
+        this.emitState();
+      });
   }
 
   /**
@@ -459,6 +505,23 @@ export class StageRenderer {
     const l = this.lighting;
     if (!r || !l) return;
     const env = this.env;
+    const own = this.sceneRelight;
+    if (env && !this.relit.has(env) && own) {
+      // A scene that declares its room (the scene generator's): the light may re-colour it as far as
+      // it says, inside that room - the box's edges are its walls, so no coloured square shows.
+      this.relit.add(env);
+      const { min, max } = own.bounds;
+      r.add(env, { bounds: { min: { x: min[0], y: min[1], z: min[2] }, max: { x: max[0], y: max[1], z: max[2] } } })
+        .then(() => { if (this.env === env) r.setParams(env, { strength: own.strength }); })
+        .catch((e: unknown) => { this.errors.push(`光影（场景）：${message(e)}`); this.emitState(); });
+    }
+    const objects = this.objects;
+    if (objects && !this.relit.has(objects)) {
+      this.relit.add(objects);
+      const strength = own?.strength ?? 0;
+      r.add(objects).then(() => { if (this.objects === objects) r.setParams(objects, { strength }); })
+        .catch((e: unknown) => { this.errors.push(`光影（物体）：${message(e)}`); this.emitState(); });
+    }
     if (env && !this.relit.has(env)) {
       this.relit.add(env);
       // The scene's baked light is real: it is never re-coloured (strength 0), only shadowed. A tint would

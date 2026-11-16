@@ -1,3 +1,5 @@
+import type { StageLighting, StageScene, StageSceneRelight } from '../../src/stage/types.ts';
+
 /** The asset library the server keeps: what Viggle generated, re-hosted under `/files/`, and the jobs making more. */
 
 export interface LibraryScene {
@@ -11,7 +13,22 @@ export interface LibraryScene {
   parentId?: string;
   /** From the scene generator: its blockout (scenegen/core/types.ts Layout), in the scene's own frame. */
   layoutUrl?: string;
+  /** From the scene generator: its objects, a second splat in the scene file's frame. */
+  objectsUrl?: string | null;
+  /** From the scene generator: the light it was designed under, for a world that has none yet. */
+  lighting?: StageLighting | null;
+  /** From the scene generator: how far that light re-colours the scene, inside its room. */
+  relight?: StageSceneRelight | null;
   createdAt: string;
+}
+
+/** The stage's scene for a library scene: everything a world needs to show it as it was made. */
+export function sceneFromLibrary(s: Pick<LibraryScene, 'name' | 'url' | 'viggle' | 'panoramaUrl' | 'objectsUrl' | 'relight'>): StageScene {
+  return {
+    name: s.name, url: s.url, placement: null, viggle: s.viggle ?? null, panoramaUrl: s.panoramaUrl ?? null,
+    ...(s.objectsUrl ? { objectsUrl: s.objectsUrl } : {}),
+    ...(s.relight ? { relight: s.relight } : {}),
+  };
 }
 
 export interface LibraryCharacter {

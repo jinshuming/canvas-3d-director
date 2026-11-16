@@ -21,6 +21,24 @@ export interface StageScene {
   viggle?: { sessionId: string; batchIds: string[] } | null;
   /** The panorama it was built from, for a cover. */
   panoramaUrl?: string | null;
+  /**
+   * Objects that stand in the scene, as a second splat in the SAME file frame (the scene generator's
+   * SAM 3D objects): mounted with the scene's placement, kept apart so filling the scene's gaps - which
+   * rebuilds the scene file from its Viggle session - does not lose them.
+   */
+  objectsUrl?: string | null;
+  /**
+   * How far the world's light may re-colour this scene, and where (the room it was built as). Absent:
+   * the scene keeps its own light and only receives the characters' shadows (see StageLighting).
+   */
+  relight?: StageSceneRelight | null;
+}
+
+export interface StageSceneRelight {
+  /** 0..1, how far the light replaces the scene's own look. */
+  strength: number;
+  /** Stage metres (floor y = 0, capture point at x = z = 0): the scene's shadow and light receiver. */
+  bounds: { min: Vec3Tuple; max: Vec3Tuple };
 }
 
 export interface StagePlacement {

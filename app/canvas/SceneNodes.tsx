@@ -18,6 +18,7 @@ import type { Project } from '../../scenegen/web/api.ts';
 import { STAGE_LABEL, watchProject } from '../../scenegen/web/runner.ts';
 import type { RunStatus } from '../../scenegen/web/runner.ts';
 import { api } from '../api.ts';
+import { sceneFromLibrary } from '../shared/library.ts';
 import { Icon } from '../icons.tsx';
 import { navigate, scenePath } from '../router.ts';
 import type { CanvasNode } from './model.ts';
@@ -61,7 +62,7 @@ export async function sendToWorld(project: Project, cover: string | null): Promi
   if (!scene) throw new Error('导入素材库后没找到这个场景。');
   const world = await api.createWorld({ title: project.title });
   const stage = await api.getStage(world.id);
-  await api.saveStage({ ...stage, title: project.title, scene: { name: scene.name, url: scene.url, placement: null, viggle: scene.viggle, panoramaUrl: scene.panoramaUrl } }, stage.version);
+  await api.saveStage({ ...stage, title: project.title, scene: sceneFromLibrary(scene), lighting: scene.lighting ?? stage.lighting ?? null }, stage.version);
   // The 导演台 node shows a cover: the panorama, or a frame of the video, until the editor saves its own.
   if (cover) await api.saveCover(world.id, await toDataUrl(cover, 960)).catch(() => {});
   return { worldId: world.id, title: world.title };

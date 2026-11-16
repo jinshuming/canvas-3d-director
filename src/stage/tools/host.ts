@@ -1,5 +1,5 @@
 import type { StageRenderer } from '../StageRenderer.js';
-import type { StageDoc } from '../types.js';
+import type { StageDoc, StageLighting, StageSceneRelight } from '../types.js';
 
 /**
  * What the stage tools need from whoever runs them: the doc, a way to change
@@ -47,6 +47,10 @@ export interface AssetRef {
   /** Scenes: the Viggle session, so views can be filled later. */
   viggle?: { sessionId: string; batchIds: string[] } | null;
   panoramaUrl?: string | null;
+  /** Scenes from the scene generator: their objects, light and how far it re-colours them (StageScene). */
+  objectsUrl?: string | null;
+  relight?: StageSceneRelight | null;
+  lighting?: StageLighting | null;
 }
 
 export interface GenerationJob {
