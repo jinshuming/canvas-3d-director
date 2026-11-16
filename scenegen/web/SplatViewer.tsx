@@ -31,6 +31,7 @@ export function SplatViewer({ url, objects = [], yaw = 0, upAxisFlip = false }: 
     let dead = false;
     let scene: Scene | null = null;
     let fly: FlyControls | null = null;
+    let tick: ((dt: number) => void) | null = null;
     const loaded = layers.current;
     setState('loading');
     void (async () => {
@@ -43,8 +44,14 @@ export function SplatViewer({ url, objects = [], yaw = 0, upAxisFlip = false }: 
           cameraTarget: { x: f[0] * 3, y: f[1] * 3, z: f[2] * 3 },
         });
         if (dead) { scene.destroy(); return; }
-        fly = new FlyControls({ flySpeed: 1.5 });
+        // FlyControls sets the camera's heading itself on attach (its yaw turns left, ours right), and
+        // moves it for held keys only in update(dt): without the per-frame tick WASD / QE do nothing
+        // (dragging still looks around - that is applied straight from the pointer events).
+        fly = new FlyControls({ flySpeed: 1.5, yaw: -yaw, pitch: -5 });
         fly.attach({ canvas: canvas.current!, cameraEntity: scene.cameraEntity });
+        const f2 = fly;
+        tick = (dt: number) => f2.update(dt);
+        scene.app.on('update', tick);
         scene.start();
         // The video mock's preview is written the same way JST-2 writes files (Y up), so no flip either way by default.
         const opts = (name: string) => ({ rotation: { x: upAxisFlip ? 180 : 0, y: 0, z: 0 }, position: { x: 0, y: 0, z: 0 }, scale: 1, filename: `${name}.spz`, name });
@@ -75,7 +82,7 @@ export function SplatViewer({ url, objects = [], yaw = 0, upAxisFlip = false }: 
         if (!dead) { setError((e as Error).message); setState('error'); }
       }
     })();
-    return () => { dead = true; fly?.detach(); for (const e of loaded.values()) e.destroy(); loaded.clear(); scene?.destroy(); };
+    return () => { dead = true; if (tick) scene?.app.off('update', tick); fly?.detach(); for (const e of loaded.values()) e.destroy(); loaded.clear(); scene?.destroy(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, yaw, upAxisFlip, attempt]);
 
