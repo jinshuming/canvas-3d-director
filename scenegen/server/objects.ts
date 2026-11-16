@@ -152,6 +152,37 @@ export function decodeRgb(file: string, size: number): Promise<Uint8Array> {
  * box reached the floor under a table and SAM 3D made a slab of it. Falls back to the blockout box
  * when little changed.
  */
+/** A pixel the painting changed into the object: a strong colour difference that is not just a shadow (which darkens every channel alike). */
+function paintedPixel(before: Uint8Array, after: Uint8Array, i: number): boolean {
+  const d = Math.max(Math.abs(after[i]! - before[i]!), Math.abs(after[i + 1]! - before[i + 1]!), Math.abs(after[i + 2]! - before[i + 2]!));
+  if (d <= 48) return false;
+  const r = [0, 1, 2].map((c) => (after[i + c]! + 4) / (before[i + c]! + 4));
+  return !(Math.max(...r) < 0.92 && Math.max(...r) - Math.min(...r) < 0.12);
+}
+
+/**
+ * The painted object's silhouette in its crop, on a `grid`² grid: cells around its box where at least
+ * 30% of the pixels changed between the empty crop and the painted one. What SAM 3D saw - the panorama
+ * has no key objects, but each crop has its own - and so what the placement checks a pose against.
+ */
+export function paintedMask(before: Uint8Array, after: Uint8Array, size: number, box: [number, number, number, number], grid = 128): Uint8Array | null {
+  const [x0, y0, x1, y1] = box;
+  const mx = (x1 - x0) * 0.15 + 8, my = (y1 - y0) * 0.15 + 8;
+  const ax0 = Math.max(0, Math.floor(x0 - mx)), ax1 = Math.min(size - 1, Math.ceil(x1 + mx));
+  const ay0 = Math.max(0, Math.floor(y0 - my)), ay1 = Math.min(size - 1, Math.ceil(y1 + my));
+  const hit = new Float32Array(grid * grid), all = new Float32Array(grid * grid);
+  let n = 0;
+  for (let y = ay0; y <= ay1; y++) for (let x = ax0; x <= ax1; x++) {
+    const c = Math.floor((y / size) * grid) * grid + Math.floor((x / size) * grid);
+    all[c]!++;
+    if (paintedPixel(before, after, (y * size + x) * 3)) { hit[c]!++; n++; }
+  }
+  if (n < 0.1 * (x1 - x0) * (y1 - y0)) return null;
+  const m = new Uint8Array(grid * grid);
+  for (let c = 0; c < m.length; c++) if (all[c]! && hit[c]! / all[c]! >= 0.3) m[c] = 1;
+  return m;
+}
+
 export function paintedBox(before: Uint8Array, after: Uint8Array, size: number, box: [number, number, number, number]): { box: [number, number, number, number]; fromPaint: boolean } {
   const [x0, y0, x1, y1] = box;
   const mx = (x1 - x0) * 0.15 + 8, my = (y1 - y0) * 0.15 + 8;
@@ -161,12 +192,7 @@ export function paintedBox(before: Uint8Array, after: Uint8Array, size: number, 
   const rows = new Uint32Array(size), cols = new Uint32Array(size);
   let n = 0;
   for (let y = ay0; y <= ay1; y++) for (let x = ax0; x <= ax1; x++) {
-    const i = (y * size + x) * 3;
-    const d = Math.max(Math.abs(after[i]! - before[i]!), Math.abs(after[i + 1]! - before[i + 1]!), Math.abs(after[i + 2]! - before[i + 2]!));
-    if (d <= 48) continue;
-    // A shadow only darkens what was there, by about the same factor in every channel: not the object.
-    const r = [0, 1, 2].map((c) => (after[i + c]! + 4) / (before[i + c]! + 4));
-    if (Math.max(...r) < 0.92 && Math.max(...r) - Math.min(...r) < 0.12) continue;
+    if (!paintedPixel(before, after, (y * size + x) * 3)) continue;
     rows[y]!++; cols[x]!++; n++;
   }
   if (n < 0.2 * (x1 - x0) * (y1 - y0)) return { box, fromPaint: false };
@@ -291,10 +317,12 @@ export interface ObjectAsset {
   gaussians: number | null;
   seconds: number | null;
   error: string | null;
-  /** Already moved to the environment's scale (composeScene), so a later compose leaves it be. */
+  /** Older scenes: moved to the environment's scale once. Placement now starts from `-sam.spz` every compose. */
   shifted?: boolean;
-  /** How it was seated (core/seat.ts): straightened by how much, moved how far, onto what. */
+  /** How it was seated (core/seat.ts): levelled by how much, moved how far, onto what. */
   seat?: import('../core/seat.ts').SeatResult;
+  /** How it was placed (core/place.ts + seatScene.placeScene): cleaned, stood up, turned, sized, pushed. */
+  place?: import('../core/place.ts').PlaceResult & { pushed: number };
 }
 
 /** Every asset object: crop the object panorama at it, SAM 3D, thin, fit to the blockout, write objects/<id>.spz. */
@@ -338,7 +366,11 @@ export async function generateObjects(layout: Layout, assets: LayoutObject[], pa
       const g = thinGaussians(readPlyGaussians(r.ply), deps.maxGaussians ?? 1_000_000);
       const fit = fitToBlockout(g, o, view.pose, capture.position);
       const file = `objects/${o.id}.spz`;
-      await wf(join(dir, file), writeSpzGaussians(g));
+      // The rough fit is also kept as the source the scene's placement starts from every time it is
+      // composed (seatScene.placeScene): `file` is what that placement writes.
+      const bytes = writeSpzGaussians(g);
+      await wf(join(dir, file), bytes);
+      await wf(join(dir, `objects/${o.id}-sam.spz`), bytes);
       deps.onProgress?.(`${++done}/${assets.length} objects: ${o.label} (${r.seconds.toFixed(0)} s)`);
       return { ...base, file, scale: fit.scale, spread: fit.spread, gaussians: g.count, seconds: r.seconds, error: null };
     } catch (e) {

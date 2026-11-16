@@ -16,7 +16,7 @@ import { scaleSpz } from '../core/gaussians.ts';
 import type { Layout } from '../core/types.ts';
 import type { Jst2Client } from './jst2.ts';
 import type { ObjectAsset } from './objects.ts';
-import { composeScene } from './textScene.ts';
+import { composeScene, shiftOf } from './textScene.ts';
 
 export interface ExpandRecord { pose: CameraPose; fov: number; batchId: string; image: string | null; credits: number; at: string }
 export interface PastJob { kind: string; log: string[]; startedAt: number; endedAt?: number; status: string }
@@ -72,7 +72,7 @@ export async function expandScene(dir: string, kind: 'text' | 'video', pose: Cam
     await writeFile(join(dir, result.files.environment ?? 'environment.spz'), env);
     p('compose', 'Composing the scene with its objects again');
     const layout = JSON.parse(await readFile(join(dir, 'layout.json'), 'utf8')) as Layout;
-    await composeScene(dir, layout, layout.capture!.position, env, result.objects ?? [], null);
+    await composeScene(dir, layout, layout.capture!, env, result.objects ?? [], shiftOf((result as { envScale?: number | null }).envScale ?? null));
   } else {
     await writeFile(join(dir, result.files.scene ?? 'scene.spz'), env);
   }

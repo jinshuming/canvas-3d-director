@@ -7,7 +7,10 @@ import { buildColliderData, SceneCollider } from '@viggle/splat-engine';
 import type { Gaussians } from '../core/gaussians.ts';
 import type { SeatResult } from '../core/seat.ts';
 import { bottomOf, centreOver, dropTo, footprint, straighten, topWithin } from '../core/seat.ts';
-import type { LayoutObject } from '../core/types.ts';
+import type { Layout, LayoutObject } from '../core/types.ts';
+import { transformGaussians } from '../core/gaussians.ts';
+import type { PlaceContext, PlaceResult } from '../core/place.ts';
+import { placeObject } from '../core/place.ts';
 
 export interface SeatItem { id: string; obj: LayoutObject; g: Gaussians }
 
@@ -55,7 +58,8 @@ export function environmentCollider(env: Gaussians, eyeHeight = 1.5): { ground: 
  * An object whose support is more than `maxDrop` away from where it is stays put (a collider hole,
  * a misread): moving it that far would be a guess.
  */
-export function seatObjects(env: Gaussians, items: SeatItem[], captureY: number, maxDrop = 0.6): Map<string, SeatResult> {
+export function seatObjects(env: Gaussians, items: SeatItem[], captureY: number, maxDrop = 0.6, opts: { straighten?: boolean } = {}): Map<string, SeatResult> {
+  const level = (g: Gaussians) => (opts.straighten === false ? { tiltDeg: 0, straightened: false } : straighten(g));
   const out = new Map<string, SeatResult>();
   const col = environmentCollider(env, captureY);
   const ids = new Set(items.map((i) => i.id));
@@ -65,7 +69,7 @@ export function seatObjects(env: Gaussians, items: SeatItem[], captureY: number,
   const roomFloor = surfaceHeight(env, { cx: 0, cz: 0, hx: 0.8, hz: 0.8 }, atCapture, 0.3);
   const onTop = items.filter((i) => i.obj.on && ids.has(i.obj.on));
   for (const it of floor) {
-    const s = straighten(it.g);
+    const s = level(it.g);
     const f = footprint(it.g);
     // From a little above where the blockout says its base is: the highest surface at or below that.
     // A small step above the blockout's base and a small disc: a big disc next to a wall reads the
@@ -86,7 +90,7 @@ export function seatObjects(env: Gaussians, items: SeatItem[], captureY: number,
     else out.set(it.id, { ...s, dy: 0, support: 'none' });
   }
   for (const it of onTop) {
-    const s = straighten(it.g);
+    const s = level(it.g);
     const parent = items.find((p) => p.id === it.obj.on)!;
     // On a known object, that object is the authority - even far from where the blockout put it
     // (measured: a lamp `on` a desk laid out at floor height). If it is not over the object's top,
@@ -96,6 +100,98 @@ export function seatObjects(env: Gaussians, items: SeatItem[], captureY: number,
     const b = bottomOf(it.g);
     if (y !== null && b !== null && Math.abs(y - b) <= 2.5) out.set(it.id, { ...s, dy: dropTo(it.g, y), support: 'object' });
     else out.set(it.id, { ...s, dy: 0, support: 'none' });
+  }
+  return out;
+}
+
+// ── The whole placement ──────────────────────────────────────────────────────
+
+export interface PlaceItem { id: string; obj: LayoutObject; g: Gaussians; crop?: PlaceContext['crop'] }
+export interface PlacedObject { g: Gaussians; place: PlaceResult & { pushed: number }; seat: SeatResult }
+
+const VOX = 0.05;
+
+/** The 5 cm cells an object's opaque splats fill (a sample of them), offset by (dx, dz). */
+function cells(p: Float32Array, dx = 0, dz = 0): Set<number> {
+  const s = new Set<number>();
+  for (let i = 0; i < p.length; i += 3) s.add(Math.floor((p[i]! + dx) / VOX) * 4_000_000 + Math.floor(p[i + 1]! / VOX + 1000) * 2_000 + Math.floor((p[i + 2]! + dz) / VOX + 1000));
+  return s;
+}
+function sampleOf(g: Gaussians, max = 20_000): Float32Array {
+  const out: number[] = [];
+  const step = Math.max(1, Math.floor(g.count / max));
+  for (let i = 0; i < g.count; i += step) if (g.alphas[i]! >= 0.3) out.push(g.positions[i * 3]!, g.positions[i * 3 + 1]!, g.positions[i * 3 + 2]!);
+  return new Float32Array(out);
+}
+const shared = (a: Set<number>, b: Set<number>) => { let n = 0; const [s, l] = a.size < b.size ? [a, b] : [b, a]; for (const k of s) if (l.has(k)) n++; return n / Math.max(1, s.size); };
+const move = (g: Gaussians, dx: number, dz: number) => transformGaussians(g, [[1, 0, 0], [0, 1, 0], [0, 0, 1]], 1, [dx, 0, dz]);
+
+/**
+ * Every object of a scene, placed (core/place.ts: cleaned, stood up, squared, sized, on the box),
+ * then held to the blockout's relations:
+ *  - on the floor the environment has under it (seatObjects);
+ *  - inside the room's walls (the blockout's, at the environment's scale): pushed in if it pokes out;
+ *  - not inside another object: where two share more than 3% of the smaller one's 5 cm cells, the
+ *    smaller is moved away - along the line between their blockout boxes - until they do not;
+ *  - a thing standing on another (a lamp on a desk) seated on that object's top last, after the
+ *    object under it has moved.
+ */
+export function placeScene(env: Gaussians, items: PlaceItem[], layout: Layout, capture: [number, number, number], shift: number | null): Map<string, PlacedObject> {
+  const out = new Map<string, PlacedObject>();
+  const placed = items.map((it) => {
+    const r = placeObject(it.g, it.obj, { capture, shift, crop: it.crop ?? null });
+    return { ...it, g: r.g, place: { ...r.result, pushed: 0 } };
+  });
+  const ids = new Set(placed.map((p) => p.id));
+  const floor = placed.filter((p) => !p.obj.on || !ids.has(p.obj.on));
+  const first = seatObjects(env, floor.map((p) => ({ id: p.id, obj: p.obj, g: p.g })), capture[1], 0.6, { straighten: false });
+
+  // Inside the walls.
+  const k = shift ?? 1;
+  if (layout.room) {
+    const { width: w, depth: d } = layout.room;
+    const lim = { x0: (-w / 2 - capture[0]) * k + 0.02, x1: (w / 2 - capture[0]) * k - 0.02, z0: (-d / 2 - capture[2]) * k + 0.02, z1: (d / 2 - capture[2]) * k - 0.02 };
+    for (const p of floor) {
+      const f = footprint(p.g);
+      const dx = f.cx - f.hx < lim.x0 ? lim.x0 - (f.cx - f.hx) : f.cx + f.hx > lim.x1 ? lim.x1 - (f.cx + f.hx) : 0;
+      const dz = f.cz - f.hz < lim.z0 ? lim.z0 - (f.cz - f.hz) : f.cz + f.hz > lim.z1 ? lim.z1 - (f.cz + f.hz) : 0;
+      // Never more than half a metre: further than that the room and the object disagree about more than an edge.
+      const cx = Math.max(-0.5, Math.min(0.5, dx)), cz = Math.max(-0.5, Math.min(0.5, dz));
+      if (cx || cz) { move(p.g, cx, cz); p.place.pushed += Math.hypot(cx, cz); }
+    }
+  }
+
+  // Not inside each other.
+  const samples = new Map(floor.map((p) => [p.id, sampleOf(p.g)]));
+  const offset = new Map(floor.map((p) => [p.id, [0, 0] as [number, number]]));
+  const occ = new Map(floor.map((p) => [p.id, cells(samples.get(p.id)!)]));
+  for (let a = 0; a < floor.length; a++) for (let b = a + 1; b < floor.length; b++) {
+    const A = floor[a]!, B = floor[b]!;
+    if (shared(occ.get(A.id)!, occ.get(B.id)!) <= 0.03) continue;
+    const [mover, other] = occ.get(A.id)!.size <= occ.get(B.id)!.size ? [A, B] : [B, A];
+    let dx = mover.obj.position[0] - other.obj.position[0], dz = mover.obj.position[2] - other.obj.position[2];
+    if (Math.hypot(dx, dz) < 1e-3) { const fm = footprint(mover.g), fo = footprint(other.g); dx = fm.cx - fo.cx; dz = fm.cz - fo.cz; }
+    const l = Math.hypot(dx, dz) || 1;
+    dx /= l; dz /= l;
+    const o = offset.get(mover.id)!;
+    for (let t = 0.02; t <= 0.4 + 1e-9; t += 0.02) {
+      const c = cells(samples.get(mover.id)!, o[0] + dx * t, o[1] + dz * t);
+      if (shared(c, occ.get(other.id)!) <= 0.01 || t >= 0.4 - 1e-9) {
+        move(mover.g, dx * t, dz * t);
+        o[0] += dx * t; o[1] += dz * t;
+        occ.set(mover.id, c);
+        mover.place.pushed += t;
+        break;
+      }
+    }
+  }
+
+  // Seated again (a push may have moved it over a step), then the things on other things.
+  const seats = seatObjects(env, placed.map((p) => ({ id: p.id, obj: p.obj, g: p.g })), capture[1], 0.6, { straighten: false });
+  for (const p of placed) {
+    const s = seats.get(p.id) ?? { dy: 0, support: 'none' as const };
+    const dy = (first.get(p.id)?.dy ?? 0) + s.dy;
+    out.set(p.id, { g: p.g, place: p.place, seat: { support: first.get(p.id)?.support ?? s.support, dy, tiltDeg: p.place.tiltDeg, straightened: p.place.tiltDeg > 0 } });
   }
   return out;
 }
