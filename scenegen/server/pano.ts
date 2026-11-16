@@ -1,17 +1,24 @@
 /**
  * Panorama providers: blockout conditions in, a 2:1 equirect panorama out.
  *
+ * - `openai-image`: GPT-image-2 with the equirect depth map (and the clay
+ *   render) as reference images - the default when OPENAI_API_KEY is set: the
+ *   layout comes from the depth, the look from the caption.
  * - `jst2-reference`: JST-2's own `/v1/scenes/pano` with the caption as the
- *   prompt and the blockout renders as reference images. Needs only the Viggle
- *   key. Also returns JST-2's reconstruction of it, whose floor gives the
- *   panorama's scale for free.
+ *   prompt and the blockout renders as reference images. Needs only the Viggle key.
  * - `fal-flux-depth`: FLUX.1 Depth [pro] on fal, conditioned on the blockout's
- *   equirect depth at 2048×1024. Follows the layout most closely. Needs FAL_KEY.
- * - `openai-image`: GPT-image-2 with the equirect depth map as the reference
- *   image (the default when OPENAI_API_KEY works): the layout comes from the
- *   depth, the look from the caption (and the user's photo, if any).
+ *   equirect depth at 2048×1024. Needs FAL_KEY.
+ *
+ * Also the other OpenAI image calls of the pipeline: the people check on a
+ * panorama and painting one object into its crop (paintObject).
  */
-import { Jst2Client, newSessionId } from './jst2.ts';
+import { spawn } from 'node:child_process';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { newSessionId } from './jst2.ts';
+import type { Jst2Client } from './jst2.ts';
 import { encodePng } from './png.ts';
 
 export interface PanoInput {
@@ -20,7 +27,6 @@ export interface PanoInput {
   depth: Uint8Array;
   semantic: Uint8Array;
   shaded: Uint8Array;
-  seed?: number;
   /** Hard numbers about the space ("room 6 × 5 m, ceiling 2.8 m, camera 1.5 m up"), stated to the image model. */
   geometry?: string;
   /** The user's input picture, if the scene came from one: the look to match. */
@@ -28,16 +34,12 @@ export interface PanoInput {
   /** Also send the clay render (pixel-aligned with the depth map) as a structure reference. */
   withClay?: boolean;
   signal?: AbortSignal;
-  onProgress?: (message: string) => void;
 }
 
 export interface PanoOutput {
   bytes: Uint8Array;
   mime: 'image/png' | 'image/jpeg';
-  /** Provider's own reconstruction (jst2-reference): enough to read the scale off. */
-  probeSpz?: Uint8Array;
   credits?: number;
-  note?: string;
 }
 
 export interface PanoProvider {
@@ -53,7 +55,6 @@ export function jst2ReferenceProvider(client: Jst2Client, available: boolean): P
     label: 'JST-2 (blockout as reference)',
     available,
     async generate(input) {
-      input.onProgress?.('JST-2 is painting the panorama from the blockout');
       let task = await client.panoFromPrompt({
         sessionId: newSessionId('sgref'),
         prompt: input.prompt,
@@ -67,15 +68,26 @@ export function jst2ReferenceProvider(client: Jst2Client, available: boolean): P
       task = await client.wait(task, { signal: input.signal });
       const pano = task.result!.panorama?.url;
       if (!pano) throw new Error('JST-2 returned no panorama.');
-      const [bytes, probeSpz] = await Promise.all([client.download(pano), client.download(task.result!.spz.url)]);
-      return { bytes, mime: bytes[0] === 0x89 ? 'image/png' : 'image/jpeg', probeSpz, credits };
+      const bytes = await client.download(pano);
+      return { bytes, mime: bytes[0] === 0x89 ? 'image/png' : 'image/jpeg', credits };
     },
   };
 }
 
+/** OpenAI's /images/edits with a filled form: the first image's bytes. `what` names the call in errors. */
+export async function openaiImageEdit(cfg: { apiKey?: string; base?: string }, form: FormData, what: string, signal?: AbortSignal, f: typeof fetch = (...a) => globalThis.fetch(...a)): Promise<Uint8Array> {
+  const res = await f(`${(cfg.base ?? 'https://api.openai.com/v1').replace(/\/$/, '')}/images/edits`, { method: 'POST', signal, headers: { Authorization: `Bearer ${cfg.apiKey}` }, body: form });
+  const body = await res.json().catch(() => null) as { data?: Array<{ b64_json?: string; url?: string }>; error?: { message?: string } } | null;
+  if (!res.ok) throw new Error(`${what} ${res.status}: ${body?.error?.message ?? 'failed'}`);
+  const item = body?.data?.[0];
+  if (item?.b64_json) return new Uint8Array(Buffer.from(item.b64_json, 'base64'));
+  if (item?.url) return new Uint8Array(await (await f(item.url)).arrayBuffer());
+  throw new Error('OpenAI returned no image.');
+}
+
 /**
  * GPT-image-2 painting the panorama with the blockout's EQUIRECT DEPTH MAP as
- * the reference image (optionally also the user's photo for the look). The
+ * the reference image (optionally the clay render, or the user's photo for the look). The
  * model returns a 3:2 frame, so the 2:1 depth is squeezed to it on the way in
  * and the result stretched back to 2:1 on the way out: the same horizontal
  * scale both ways, so every pixel keeps its direction.
@@ -90,7 +102,6 @@ export function openaiImageProvider(cfg: { apiKey?: string; base?: string; model
     async generate(input) {
       if (!cfg.apiKey) throw new Error('OPENAI_API_KEY is not set.');
       const [w, h] = size.split('x').map(Number) as [number, number];
-      input.onProgress?.(`${model} is painting the panorama from the depth map`);
       const form = new FormData();
       form.append('model', model);
       form.append('size', size);
@@ -103,17 +114,9 @@ export function openaiImageProvider(cfg: { apiKey?: string; base?: string; model
         form.append('image[]', new Blob([clay as BlobPart], { type: 'image/png' }), 'clay-equirect.png');
       }
       if (input.styleImage) form.append('image[]', new Blob([input.styleImage.bytes as BlobPart], { type: input.styleImage.mime }), 'style-reference.png');
-      const res = await f(`${(cfg.base ?? 'https://api.openai.com/v1').replace(/\/$/, '')}/images/edits`, { method: 'POST', signal: input.signal, headers: { Authorization: `Bearer ${cfg.apiKey}` }, body: form });
-      const body = await res.json().catch(() => null) as { data?: Array<{ b64_json?: string; url?: string }>; error?: { message?: string } } | null;
-      if (!res.ok) throw new Error(`OpenAI image ${res.status}: ${body?.error?.message ?? 'failed'}`);
-      const item = body?.data?.[0];
-      let bytes: Uint8Array;
-      if (item?.b64_json) bytes = new Uint8Array(Buffer.from(item.b64_json, 'base64'));
-      else if (item?.url) bytes = new Uint8Array(await (await f(item.url)).arrayBuffer());
-      else throw new Error('OpenAI returned no image.');
+      const bytes = await openaiImageEdit(cfg, form, 'OpenAI image', input.signal, f);
       // Back to 2:1 equirect.
-      const pano = await resizeImage(bytes, 2048, 1024, 'png');
-      return { bytes: pano, mime: 'image/png' };
+      return { bytes: await resizeImage(bytes, 2048, 1024, 'png'), mime: 'image/png' };
     },
   };
 }
@@ -133,9 +136,8 @@ export function depthPrompt(caption: string, withStyle: boolean, geometry?: stri
 }
 
 /** Resize with ffmpeg (on the dev machine; no image library in Node). */
-export async function resizeImage(bytes: Uint8Array, w: number, h: number, fmt: 'png' | 'jpg'): Promise<Uint8Array> {
-  const { spawn } = await import('node:child_process');
-  return await new Promise((resolve, reject) => {
+export function resizeImage(bytes: Uint8Array, w: number, h: number, fmt: 'png' | 'jpg'): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
     const p = spawn('ffmpeg', ['-v', 'error', '-i', 'pipe:0', '-vf', `scale=${w}:${h}:flags=lanczos`, '-f', 'image2pipe', '-vcodec', fmt === 'png' ? 'png' : 'mjpeg', 'pipe:1']);
     const out: Buffer[] = [];
     let err = '';
@@ -154,7 +156,6 @@ export function falFluxDepthProvider(key: string | undefined, f: typeof fetch = 
     available: Boolean(key),
     async generate(input) {
       if (!key) throw new Error('FAL_KEY is not set for the scene generator.');
-      input.onProgress?.('FLUX depth is painting the panorama');
       const res = await f('https://fal.run/fal-ai/flux-pro/v1/depth', {
         method: 'POST',
         signal: input.signal,
@@ -165,7 +166,6 @@ export function falFluxDepthProvider(key: string | undefined, f: typeof fetch = 
           image_size: { width: 2048, height: 1024 },
           num_inference_steps: 28,
           output_format: 'png',
-          ...(input.seed !== undefined ? { seed: input.seed } : {}),
         }),
       });
       const body = await res.json().catch(() => null) as { images?: Array<{ url: string }>; detail?: unknown } | null;
@@ -233,12 +233,7 @@ export async function paintObject(cfg: { apiKey?: string; base?: string; model?:
   form.append('image[]', new Blob([image as BlobPart], { type: 'image/png' }), 'photo.png');
   form.append('image[]', new Blob([guide as BlobPart], { type: 'image/png' }), 'blockout.png');
   form.append('mask', new Blob([encodePng(rgba, S, S, 4) as BlobPart], { type: 'image/png' }), 'mask.png');
-  const res = await f(`${(cfg.base ?? 'https://api.openai.com/v1').replace(/\/$/, '')}/images/edits`, { method: 'POST', signal: input.signal, headers: { Authorization: `Bearer ${cfg.apiKey}` }, body: form });
-  const body = await res.json().catch(() => null) as { data?: Array<{ b64_json?: string; url?: string }>; error?: { message?: string } } | null;
-  if (!res.ok) throw new Error(`OpenAI image edit ${res.status}: ${body?.error?.message ?? 'failed'}`);
-  const item = body?.data?.[0];
-  const bytes = item?.b64_json ? new Uint8Array(Buffer.from(item.b64_json, 'base64')) : item?.url ? new Uint8Array(await (await f(item.url)).arrayBuffer()) : null;
-  if (!bytes) throw new Error('OpenAI returned no image.');
+  const bytes = await openaiImageEdit(cfg, form, 'OpenAI image edit', input.signal, f);
   // The model repaints the whole frame; keep its pixels only under the mask (feathered), the original elsewhere.
   const alpha = new Uint8Array(S * S);
   for (let i = 0; i < S * S; i++) alpha[i] = rgba[i * 4 + 3]! < 128 ? 255 : 0;
@@ -259,13 +254,9 @@ function feather(a: Uint8Array, w: number, h: number, r: number): Uint8Array {
 
 /** base where alpha is 0, top where it is 255, blended between (ffmpeg alphamerge + overlay). */
 async function composite(base: Uint8Array, top: Uint8Array, alphaPng: Uint8Array, w: number, h: number): Promise<Uint8Array> {
-  const { spawn } = await import('node:child_process');
-  const { mkdtemp, writeFile: wf, readFile: rf, rm } = await import('node:fs/promises');
-  const { tmpdir } = await import('node:os');
-  const { join } = await import('node:path');
   const dir = await mkdtemp(join(tmpdir(), 'sg-comp-'));
   try {
-    await Promise.all([wf(join(dir, 'b.png'), base), wf(join(dir, 't.png'), top), wf(join(dir, 'a.png'), alphaPng)]);
+    await Promise.all([writeFile(join(dir, 'b.png'), base), writeFile(join(dir, 't.png'), top), writeFile(join(dir, 'a.png'), alphaPng)]);
     await new Promise<void>((resolve, reject) => {
       const fc = `[0]scale=${w}:${h},format=rgba[b];[1]scale=${w}:${h},format=rgba[t];[2]scale=${w}:${h},format=gray[a];[t][a]alphamerge[ta];[b][ta]overlay=format=auto,format=rgb24`;
       const p = spawn('ffmpeg', ['-v', 'error', '-y', '-i', join(dir, 'b.png'), '-i', join(dir, 't.png'), '-i', join(dir, 'a.png'), '-filter_complex', fc, join(dir, 'o.png')]);
@@ -274,7 +265,7 @@ async function composite(base: Uint8Array, top: Uint8Array, alphaPng: Uint8Array
       p.on('error', reject);
       p.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg composite failed: ${err.slice(0, 200)}`))));
     });
-    return new Uint8Array(await rf(join(dir, 'o.png')));
+    return new Uint8Array(await readFile(join(dir, 'o.png')));
   } finally { await rm(dir, { recursive: true, force: true }); }
 }
 

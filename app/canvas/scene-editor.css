@@ -43,25 +43,14 @@
 .se-strip { flex: none; display: flex; align-items: center; gap: 16px; padding: 0 16px 14px; color: #a1a1aa; flex-wrap: wrap; }
 .se-strip b { color: #ececee; }
 .se-thumb { width: 40px; height: 40px; border-radius: 8px; object-fit: cover; }
+.se-thumb.failed { opacity: .4; outline: 2px solid rgba(239, 68, 68, .7); outline-offset: -2px; }
 
+/* 场景重建's side panel (the 场景生成 side is the agent panel). */
 .se-chat { min-height: 0; width: 400px; display: flex; flex-direction: column; background: #111113; border-left: 1px solid rgba(255,255,255,.07); }
 .se-chat > header { flex: none; height: 46px; display: flex; align-items: center; gap: 8px; padding: 0 16px; font-weight: 600; border-bottom: 1px solid rgba(255,255,255,.05); }
 .se-log { flex: 1; overflow: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
-.se-hint { color: #8b8b93; line-height: 1.6; }
-.se-hint p { margin: 0 0 8px; }
-.se-msg { padding: 9px 12px; border-radius: 12px; line-height: 1.5; white-space: pre-wrap; max-width: 92%; }
-.se-msg.user { align-self: flex-end; background: #2a2a2f; }
-.se-msg.assistant { background: #18181b; border: 1px solid rgba(255,255,255,.06); }
-.se-msg.pending { color: #8b8b93; }
-.se-msg.tool { align-self: stretch; max-width: none; padding: 4px 10px; font-size: 11px; color: #8b8b93; border: 1px dashed rgba(255,255,255,.1); background: none; }
-.se-msg.tool.err { border-color: rgba(239,68,68,.5); }
-.se-msg.tool pre { white-space: pre-wrap; max-height: 200px; overflow: auto; margin: 4px 0; }
 .se-composer { flex: none; padding: 12px; border-top: 1px solid rgba(255,255,255,.05); display: grid; gap: 8px; }
-.se-composer textarea { width: 100%; height: 76px; resize: none; box-sizing: border-box; border-radius: 12px; border: 1px solid rgba(255,255,255,.1); background: #18181b; color: #ececee; padding: 10px 12px; font: inherit; outline: none; }
-.se-composer textarea:focus { border-color: rgba(255,255,255,.25); }
 .se-row { display: flex; align-items: center; gap: 8px; }
-.se-send { width: 36px; height: 36px; border-radius: 50%; border: 0; display: grid; place-items: center; background: #f4f4f5; color: #0b0b0c; cursor: pointer; }
-.se-send:disabled { background: #2a2a2f; color: #71717a; cursor: default; }
 
 .se-panel h4 { margin: 10px 0 2px; font-size: 12px; color: #a1a1aa; font-weight: 600; }
 .se-table { width: 100%; border-collapse: collapse; }
@@ -73,7 +62,7 @@
 .se-pair figcaption { grid-column: 1 / -1; font-size: 11px; color: #8b8b93; }
 .se-joblog pre { white-space: pre-wrap; font-size: 11px; color: #8b8b93; max-height: 240px; overflow: auto; }
 
-/* The viewers from scenegen/web, which this page uses without that page's stylesheet. */
+/* The viewers from scenegen/web, used here without that page's stylesheet. */
 .se-root .viewport { position: relative; overflow: hidden; }
 .se-root .viewport canvas { display: block; }
 .se-root .splat-viewer { position: relative; width: 100%; height: 100%; background: #101214; }
@@ -85,7 +74,7 @@
 .se-root .splat-viewer .layers label.failed { color: #ff8a80; }
 .se-root .splat-viewer .layers label.loading { opacity: .6; }
 .se-root .splat-viewer .layers button, .se-root .splat-viewer .overlay button { font-size: 11px; margin-top: 4px; }
-.se-thumb.failed { opacity: .4; outline: 2px solid rgba(239, 68, 68, .7); outline-offset: -2px; }
+.se-root .splat-viewer .relight-error { position: absolute; left: 10px; top: 10px; padding: 4px 8px; border-radius: 6px; background: rgba(127,29,29,.8); color: #fecaca; font-size: 11px; }
 .se-root .splat-viewer .expand-btn { position: absolute; right: 12px; bottom: 12px; display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 16px; border-radius: 999px; border: 1px solid rgba(255,255,255,.18); background: rgba(17,17,19,.82); color: #f4f4f5; font: 600 13px inherit; cursor: pointer; backdrop-filter: blur(8px); }
 .se-root .splat-viewer .expand-btn::before { content: "⤢"; font-size: 15px; }
 .se-root .splat-viewer .expand-btn:hover:not(:disabled) { background: #f4f4f5; color: #0b0b0c; }
@@ -126,4 +115,3 @@
 .se-knobs input[type=range] { width: 100%; accent-color: #fde68a; }
 .se-knobs input[type=color] { width: 100%; height: 26px; border: 0; background: none; padding: 0; }
 .se-light-note { margin: 0; font-size: 11px; color: #71717a; }
-.se-root .splat-viewer .relight-error { position: absolute; left: 10px; top: 10px; padding: 4px 8px; border-radius: 6px; background: rgba(127,29,29,.8); color: #fecaca; font-size: 11px; }

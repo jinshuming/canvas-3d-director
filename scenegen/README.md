@@ -4,8 +4,8 @@
 
 | 入口 | 流程 |
 |---|---|
-| **文本 / 图片 / 视频 → 场景** | **快速白模**：一次结构化模型调用给出房间、开口、物体（含相对关系、关键物体标记）和风格，确定性地摆放、推开重叠、选拍摄点（约 15 秒；之后的对话由 agent 改白模）→ 渲染等距深度图和白模图 → GPT-image-2 按需画全景：先画 1 张，与白模的对齐分 ≥ 0.8 且没有显眼人物就用；否则再并行画 2 张，选没有人物、对齐分最高的一张（3 张都有人物再画最后 2 张，最多 5 张）→ 交给 SAM 3D 的物体（关键物体和放在它们上面的东西）**不进环境的白模**：环境全景图从去掉它们的白模画（深度图、白模图都不含它们；提示词也去掉用户原话、风格概述和材质这些会点名它们的文字，否则模型会照着文字把它们画回来），所以环境里从来没有这些物体，也不需要擦除 → **分两路**：① 环境：这张全景图直接给 JST-2 `custom-pano` 建环境 → 检测缺口自动补视角，得到 `environment.spz`；② 物体：每个物体按白模位置从环境全景图切透视图，在这张小图里单独把它画进去（完整白模同视角的白模图作位置参考，遮罩限定在投影框内，框外像素保持原样；一次只画一个物体，几个一起画模型会把它们画错位置）→ 用「画进去的东西」的包围框（对比画前画后，不算阴影；白模投影框会把沙发靠背、桌腿切掉）作提示 → fal SAM 3D 生成高斯物体 → 保留 SAM 3D 给出的全部高斯（约 50 万；按大小精简到 15 万会把物体表面变成半透明的雾）→ 按白模的尺寸和位置拟合，得到 `objects/<id>.spz` → 量出环境相对白模的水平尺度（墙面距离的中位比，常见 0.83–0.95），按它把物体挪到环境里对应的位置（尺寸不变；否则靠墙的物体会埋进墙里）→ 按白模空间关系组合成 `scene.spz`，3D 查看器分层加载（可单独开关环境 / 每个物体） |
-| **视频 → 场景** | 抽帧（去模糊、按重叠度选关键帧）→ COLMAP 估计位姿 → 重力对齐、按相机高 1.5 m 定尺度。JST-2 还不能上传图片+位姿，所以默认走 `videoGen.ts`：选视频里环顾最多的位置作锚点，把附近帧按位姿拼成 360° 全景（真实像素）→ GPT-image-2 只补视频没拍到的部分 → `custom-pano` 在锚点建场景（与视频同一坐标系）→ 在视频自己的相机位置 `generate` 视角 → `reconstruct` → 补缺口 → 与 COLMAP 点对比（风车村：83% 的点在 ±25% 内）。离锚点越远，画面越多是模型补的。`posed-images`（**接口待开放，目前由内置 mock 代替**）上线后改走真实帧 |
+| **文本 / 图片 / 视频 → 场景** | **快速白模**（`quickLayout.ts`）：一次结构化模型调用给出房间、开口、物体（含相对关系、关键物体标记）和风格，确定性地摆放、推开重叠、选拍摄点（约 15 秒；之后的对话由 agent 改白模）→ 渲染等距深度图和白模图 → GPT-image-2 **按需画全景**：先画 1 张，与白模的对齐分 ≥ 0.8 且没有显眼人物就用；否则再并行画 2 张，选没有人物、对齐分最高的一张（3 张都有人物再画最后 2 张，最多 5 张）→ 交给 SAM 3D 的物体**不进环境的白模**：环境全景从去掉它们的白模画，提示词也去掉用户原话、风格概述和材质（否则模型会照着文字把它们画回来），所以不需要擦除 → **分两路并行**：① 环境：全景图给 JST-2 `custom-pano`，按 1 单位 = 1 建一次，从拍摄点到地面的距离量出 `metersPerUnit`，缩放成米 → 自动补缺口（`fill.ts`），得到 `environment.spz`；② 物体（`objects.ts`）：每个物体在环境全景的透视裁图里单独画进去（完整白模同视角作位置参考，遮罩限定在投影框内；一次只画一个，几个一起画会错位）→ 用「画进去的东西」的包围框作提示 → fal SAM 3D 生成高斯物体，原样存为 `objects/<id>-sam.spz` → 量出环境相对白模的水平尺度（常见 0.83–0.95）→ `composeScene` 把每个物体摆进环境（见下文「摆放」），合成 `scene.spz`；3D 查看器分层加载 |
+| **视频 → 场景** | 抽帧（去模糊、按重叠度选关键帧）→ COLMAP 估计位姿 → 重力对齐、按相机高 1.5 m 定尺度。JST-2 还不能上传图片+位姿，所以默认走 `videoGen.ts`：选视频里环顾最多的位置作锚点，把附近帧按位姿拼成 360° 全景（真实像素）→ GPT-image-2 只补视频没拍到的部分 → `custom-pano` 在锚点建场景（1 单位 = 1，按锚点相机高度换算成米，与视频同一坐标系）→ 在视频自己的相机位置 `generate` 视角 → `reconstruct` → 补缺口 → 与 COLMAP 点对比（风车村：83% 的点在 ±25% 内）。离锚点越远，画面越多是模型补的。`posed-images`（**接口待开放，目前由内置 mock 代替**）上线后改走真实帧 |
 
 方案和调研见 `docs/SCENEGEN_DESIGN.md`、`docs/ATLAS_ANALYSIS.md`。
 
@@ -15,6 +15,8 @@
 npm install
 npm run dev            # http://localhost:5193/scenegen/
 ```
+
+如果访问 OpenAI 需要代理，启动前设置 `NODE_USE_ENV_PROXY=1` 和 `HTTPS_PROXY`。
 
 `.env.local` 里需要的 key（只在服务端用，不会进页面）：
 
@@ -39,7 +41,7 @@ uv venv -p 3.12 .venv && uv pip install -p .venv -r requirements.txt   # pycolma
 ```bash
 npm test               # 导演台 + scenegen 的 TS 测试
 npm run test:video     # 视频管线 pytest（含在 livingRoom 漫游视频上的集成测试，约 30 s）
-npx tsx scenegen/eval/e2e.mts .data/scenegen/eval/<run> [组 id|功能]   # 真实端到端（dev server 运行时）
+SCENEGEN_E2E_VIDEOS=<视频目录> npx tsx scenegen/eval/e2e.mts .data/scenegen/eval/<run> [组 id|功能]   # 真实端到端（dev server 运行时，花额度）
 npm run typecheck
 ```
 
@@ -50,9 +52,9 @@ npm run typecheck
 | `core/` | Node 和页面都能跑：白模资产库（`catalog.ts`，36 类参数化形体）、按关系摆放和布局检查（`layout.ts`）、CPU 射线求交（`geometry.ts`）、等距柱状深度 / 语义 / 白模渲染（`render.ts`）、拍摄点搜索（`capture.ts`）、全景 prompt（`caption.ts`）、坐标约定（`frame.ts`）、SPZ 读写、与白模的深度一致性（`align.ts`） |
 | `agent/` | 布局 agent：系统提示词、14 个工具、对话循环（在页面里执行工具，服务端只转发模型） |
 | `web/` | 批量测试页；`api.ts` 是项目 API 客户端（页面、画布节点、评测脚本共用），`agentHost.ts` 是 agent 工具和项目 API 之间的桥（三处共用），`runner.ts` 供画布节点调用 |
-| `server/` | Vite 中间件（`plugin.ts`）、JST-2 客户端（含 posed-images）、全景图 provider（GPT-image-2 / JST-2 / FLUX）、全景对齐打分（`alignScore.ts`）、文本管线（`textScene.ts`）、自动补缺口（`fill.ts`，复用 `src/stage/scenecheck.ts` 的 PINOC 检测）、视频管线（`videoScene.ts`、`keyframes.ts`）、posed-images mock |
+| `server/` | Vite 中间件和 HTTP API（`plugin.ts`）、JST-2 客户端（含 posed-images）和 mock、快速白模（`quickLayout.ts`）、全景图 provider 和物体重绘（`pano.ts`）、全景对齐打分（`alignScore.ts`）、文本管线（`textScene.ts`）、SAM 3D 物体（`objects.ts`）和摆放（`seatScene.ts`）、自动补缺口（`fill.ts`，复用 `src/stage/scenecheck.ts` 的 PINOC 检测）、扩展场景（`expand.ts`）、视频管线（`videoScene.ts`、`videoGen.ts`、`keyframes.ts`） |
 | `py/` | `videoscene/`：视频 → 图片 + 位姿（抽帧、COLMAP、规范化、选视角）；`panoalign.py`：全景图与白模的对齐打分 |
-| `eval/` | `e2e.mts`：真实端到端测试（花额度）；`panoab.mts`：出图方式对比（只花 GPT-image 调用） |
+| `eval/` | `e2e.mts`：真实端到端测试（花额度）；`panoab.mts`：出图方式对比（只花 GPT-image 调用）；`replace.mts`、`topdown.mts`：重摆物体、画俯视图（不花额度） |
 | `../app/canvas/SceneNodes.tsx` | 画布上的「场景生成」「场景重建」节点：每个节点对应一个 scenegen 项目 |
 | `../app/server/openaiRelay.ts` | 导演台 agent 和场景 agent 共用的 OpenAI Responses 流式转发 |
 
@@ -85,7 +87,7 @@ npm run typecheck
 - 白模世界：米，+Y 向上，地面 y = 0，-Z 为北。
 - **场景文件**：拍摄点在原点，米，+Y 向上，地面在 y = -1.5。这正是导演台对生成场景的假设，所以导入后比例 ≈ 1，导演台的「扩展场景」也能直接用。`layout.json` 的 `sceneFrame.origin` 记录拍摄点在白模世界里的位置。
 - JST-2 `custom-pano` 把调用方的世界当作 OpenCV 风格（Y 向下），写文件时翻转 Y、Z。所以发给它的位姿要先翻转（`toServiceC2W`），文件才是 Y 向上。
-- `metersPerUnit` 以拍摄点为中心缩放；每张全景的单位不同，所以先从 provider 自己的重建（或一次 mpu=1 的标定调用）量出拍摄点到地面的距离，再用 1.5 / 距离 正式生成。
+- 每张全景重建出来的单位不同。所以按 1 单位 = 1 只建一次，量出拍摄点到地面的距离，`metersPerUnit` = 1.5 / 距离，把文件缩放成米。JST-2 会话仍是原单位（`sessionInUnits`）：补缺口、扩展场景发出的位姿要除以 `metersPerUnit`，重建结果再乘回来。没有 `sessionInUnits` 的旧场景，会话本身就是米。
 
 ## 给 JST-2 后端：`POST /v1/scenes/posed-images`（待开放）
 

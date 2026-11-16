@@ -12,7 +12,8 @@
  *     patch otherwise pull the bounds, so the size, the centre and the bottom.
  *  2. UPRIGHT: which of its own six axes is up - the one whose height and footprint match the
  *     blockout box (yaw-free: footprint as its minimum-area rectangle); SAM 3D's own up wins unless
- *     another fits half again better. Then the support plane (seat.ts) is levelled.
+ *     it has no level base or another fits more than twice as well. Then the small tilt that makes
+ *     its horizontal surfaces sharpest is levelled (levelTilt).
  *  3. FACING: the turn about the vertical that squares the object with the blockout box (the least
  *     footprint area in the box's axes), then which quarter: SAM 3D's heading unless the box's size
  *     or the painted crop's silhouette (seen from the crop camera) clearly says a quarter turn.
@@ -27,19 +28,9 @@
 import type { CameraPose } from './frame.ts';
 import { basis } from './frame.ts';
 import type { Gaussians, Mat3 } from './gaussians.ts';
-import { pick, transformGaussians } from './gaussians.ts';
+import { IDENTITY as I, mul, opaqueSample, pick, quantile, rotY, transformGaussians, translateGaussians } from './gaussians.ts';
 import { supportTilt } from './seat.ts';
 import type { LayoutObject } from './types.ts';
-
-const I: Mat3 = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
-
-export const mul = (a: Mat3, b: Mat3): Mat3 => [0, 1, 2].map((r) => [0, 1, 2].map((c) => a[r]![0]! * b[0]![c]! + a[r]![1]! * b[1]![c]! + a[r]![2]! * b[2]![c]!)) as Mat3;
-
-/** Turn about +Y by `deg` (x towards -z for positive angles, like the blockout's yaw turning the front from +Z to +X). */
-export function rotY(deg: number): Mat3 {
-  const r = (deg * Math.PI) / 180, c = Math.cos(r), s = Math.sin(r);
-  return [[c, 0, s], [0, 1, 0], [-s, 0, c]];
-}
 
 /** The six turns that put one of an object's axes up: +Y (none), -Y, +X, -X, +Z, -Z. */
 const UPS: Array<{ name: string; R: Mat3 }> = [
@@ -51,7 +42,7 @@ const UPS: Array<{ name: string; R: Mat3 }> = [
   { name: '-z', R: [[1, 0, 0], [0, 0, -1], [0, 1, 0]] },
 ];
 
-/** Points of a sample, as a thin Gaussians (what seat.ts reads: positions and alphas). */
+/** Points of a sample, as a thin Gaussians (what supportTilt reads: positions and alphas). */
 function asGaussians(p: Float32Array): Gaussians {
   const n = p.length / 3;
   return { count: n, positions: p, alphas: new Float32Array(n).fill(1), scales: new Float32Array(0), rotations: new Float32Array(0), colors: new Float32Array(0) };
@@ -68,16 +59,12 @@ function apply(R: Mat3, p: Float32Array): Float32Array {
   return o;
 }
 
-function quant(v: number[], q: number): number {
-  return v[Math.min(v.length - 1, Math.max(0, Math.floor(v.length * q)))]!;
-}
-
 /** Trimmed extent (2-98%) of the points along an axis. */
 function extent(p: Float32Array, axis: number): { lo: number; hi: number } {
   const v: number[] = [];
   for (let i = axis; i < p.length; i += 3) v.push(p[i]!);
   v.sort((a, b) => a - b);
-  return { lo: quant(v, 0.02), hi: quant(v, 0.98) };
+  return { lo: quantile(v, 0.02), hi: quantile(v, 0.98) };
 }
 
 /** Extents of points turned by `deg` about Y: width (x) and depth (z). */
@@ -86,11 +73,18 @@ function footprintAt(p: Float32Array, deg: number): [number, number] {
   const xs: number[] = [], zs: number[] = [];
   for (let i = 0; i < p.length; i += 3) { xs.push(c * p[i]! + s * p[i + 2]!); zs.push(-s * p[i]! + c * p[i + 2]!); }
   xs.sort((a, b) => a - b); zs.sort((a, b) => a - b);
-  return [quant(xs, 0.98) - quant(xs, 0.02), quant(zs, 0.98) - quant(zs, 0.02)];
+  return [quantile(xs, 0.98) - quantile(xs, 0.02), quantile(zs, 0.98) - quantile(zs, 0.02)];
+}
+
+/** Width and depth of the points' minimum-area footprint rectangle (turns about Y tried every 6°). */
+function minFootprint(p: Float32Array): [number, number] {
+  let best = Infinity, fb: [number, number] = [1, 1];
+  for (let d = 0; d < 90; d += 6) { const [w, dd] = footprintAt(p, d); if (w * dd < best) { best = w * dd; fb = [w, dd]; } }
+  return fb;
 }
 
 /** max / min of the ratios between the blockout's size and the object's: 1 when the shape matches. */
-export function spreadOf(size: [number, number, number], dims: [number, number, number]): number {
+function spreadOf(size: [number, number, number], dims: [number, number, number]): number {
   const r = [0, 1, 2].map((k) => size[k]! / Math.max(1e-6, dims[k]!));
   return Math.max(...r) / Math.min(...r);
 }
@@ -180,18 +174,18 @@ export function bodyIndices(g: Gaussians, size?: [number, number, number]): { ke
  * height that lie outside the footprint of the body above (the part above 15% of the height),
  * widened by 8%. Returns the indices to drop - none if that would be more than 15% of the object.
  */
-export function floorPatch(up: Float32Array, alphas: Float32Array): number[] {
+function floorPatch(up: Float32Array, alphas: Float32Array): number[] {
   const n = up.length / 3;
   const ys: number[] = [];
   for (let i = 0; i < n; i++) if (alphas[i]! >= 0.3) ys.push(up[i * 3 + 1]!);
   if (ys.length < 100) return [];
   ys.sort((a, b) => a - b);
-  const lo = quant(ys, 0.02), h = quant(ys, 0.98) - lo;
+  const lo = quantile(ys, 0.02), h = quantile(ys, 0.98) - lo;
   const xs: number[] = [], zs: number[] = [];
   for (let i = 0; i < n; i++) if (alphas[i]! >= 0.3 && up[i * 3 + 1]! > lo + 0.15 * h) { xs.push(up[i * 3]!); zs.push(up[i * 3 + 2]!); }
   if (xs.length < 50) return [];
   xs.sort((a, b) => a - b); zs.sort((a, b) => a - b);
-  const bx0 = quant(xs, 0.01), bx1 = quant(xs, 0.99), bz0 = quant(zs, 0.01), bz1 = quant(zs, 0.99);
+  const bx0 = quantile(xs, 0.01), bx1 = quantile(xs, 0.99), bz0 = quantile(zs, 0.01), bz1 = quantile(zs, 0.99);
   const mx = (bx1 - bx0) * 0.08, mz = (bz1 - bz0) * 0.08;
   const drop: number[] = [];
   for (let i = 0; i < n; i++) {
@@ -207,7 +201,7 @@ export function floorPatch(up: Float32Array, alphas: Float32Array): number[] {
 export const MASK_GRID = 128;
 
 /** Where the points fall in a crop camera at the capture point (the file frame's origin), on a MASK_GRID² grid. */
-export function silhouette(p: Float32Array, crop: CameraPose, fov: number): Uint8Array {
+function silhouette(p: Float32Array, crop: CameraPose, fov: number): Uint8Array {
   const N = MASK_GRID, out = new Uint8Array(N * N);
   const { right, up, forward } = basis(crop);
   const f = N / 2 / Math.tan(((fov / 2) * Math.PI) / 180);
@@ -228,7 +222,7 @@ export function silhouette(p: Float32Array, crop: CameraPose, fov: number): Uint
   return d;
 }
 
-export function iou(a: Uint8Array, b: Uint8Array): number {
+function iou(a: Uint8Array, b: Uint8Array): number {
   let inter = 0, uni = 0;
   for (let i = 0; i < a.length; i++) { if (a[i] && b[i]) inter++; if (a[i] || b[i]) uni++; }
   return uni ? inter / uni : 0;
@@ -264,7 +258,7 @@ function layering(p: Float32Array, R: Mat3, bin: number): number {
  * reads a badly tilted table by the legs on its low side only and can tilt it further.) Nothing
  * flat to go by (a plant, a lamp): no tilt that sharpens by 10% - left as it is.
  */
-export function levelTilt(p: Float32Array): { R: Mat3; deg: number } | null {
+function levelTilt(p: Float32Array): { R: Mat3; deg: number } | null {
   const sub: number[] = [];
   const stride = Math.max(1, Math.floor(p.length / 3 / 12_000));
   for (let i = 0; i < p.length; i += 3 * stride) sub.push(p[i]!, p[i + 1]!, p[i + 2]!);
@@ -287,10 +281,8 @@ export function levelTilt(p: Float32Array): { R: Mat3; deg: number } | null {
   // A levelled object fits a smaller box than a tilted one; leaves or a soft shape that happened to
   // stack into a layer when tipped (a plant tipped 30°) fit a bigger one: not a levelling.
   const volume = (M: Mat3) => {
-    const t = apply(M, q), ey = extent(t, 1);
-    let a = Infinity;
-    for (let d = 0; d < 90; d += 6) { const [w, dd] = footprintAt(t, d); a = Math.min(a, w * dd); }
-    return (ey.hi - ey.lo) * a;
+    const t = apply(M, q), ey = extent(t, 1), [w, d] = minFootprint(t);
+    return (ey.hi - ey.lo) * (w * d);
   };
   if (volume(R) > volume(I) * 0.99) return null;
   return { R, deg: (Math.acos(Math.min(1, R[1][1])) * 180) / Math.PI };
@@ -355,8 +347,7 @@ export function placeObject(g0: Gaussians, obj: LayoutObject, ctx: PlaceContext)
   const upScore = (R: Mat3) => {
     const q = apply(R, P);
     const e = extent(q, 1);
-    let best = Infinity, fb: [number, number] = [1, 1];
-    for (let d = 0; d < 90; d += 6) { const [w, dd] = footprintAt(q, d); if (w * dd < best) { best = w * dd; fb = sortedSize(w, dd); } }
+    const fb = sortedSize(...minFootprint(q));
     return spreadOf([obj.size[1], boxBig, boxSmall], [e.hi - e.lo, fb[0], fb[1]]);
   };
   // Size alone is not enough to turn an object over (a chair SAM 3D gave with its table fits a chair's
@@ -397,10 +388,7 @@ export function placeObject(g0: Gaussians, obj: LayoutObject, ctx: PlaceContext)
   }
   const removed = 1 - g.count / Math.max(1, g0.count);
   // The sample again, from what is left.
-  const Q: number[] = [];
-  const step = Math.max(1, Math.floor(g.count / 30_000));
-  for (let i = 0; i < g.count; i += step) if (g.alphas[i]! >= 0.3) Q.push(g.positions[i * 3]! - c0[0], g.positions[i * 3 + 1]! - c0[1], g.positions[i * 3 + 2]! - c0[2]);
-  const P2 = new Float32Array(Q);
+  const P2 = opaqueSample(g, 30_000, c0);
 
   // Level it: the tilt that makes its horizontal surfaces sharpest.
   const lv = levelTilt(apply(R, P2));
@@ -451,7 +439,7 @@ export function placeObject(g0: Gaussians, obj: LayoutObject, ctx: PlaceContext)
   for (const q of quarters.slice(1)) if (score(q) + 0.35 < score(chosen)) chosen = q;
 
   // 4. Apply: centre, turn, scale, move - once.
-  transformGaussians(g, I, 1, [-c0[0], -c0[1], -c0[2]]);
+  translateGaussians(g, [-c0[0], -c0[1], -c0[2]]);
   transformGaussians(g, chosen.Rk, chosen.s, chosen.tr);
   return { g, result: { removed, up: upChoice.name, tiltDeg, yawDeg: chosen.deg, spread: chosen.spread, scale: chosen.s, iou: chosen.sil, suspect: chosen.spread > 2.5 } };
 }

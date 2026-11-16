@@ -26,8 +26,8 @@ export interface RelightBox { min: [number, number, number]; max: [number, numbe
 /** A camera in the scene file's frame: metres, our yaw (0 north / -Z, 90 east), pitch up positive. */
 export interface ViewerPose { position: [number, number, number]; yaw: number; pitch: number }
 
-export function SplatViewer({ url, objects = [], yaw = 0, upAxisFlip = false, start, onExpand, expanding = false, expandHint, lighting = null, relightBox = null }: {
-  url: string; objects?: SplatLayer[]; yaw?: number; upAxisFlip?: boolean;
+export function SplatViewer({ url, objects = [], yaw = 0, start, onExpand, expanding = false, expandHint, lighting = null, relightBox = null }: {
+  url: string; objects?: SplatLayer[]; yaw?: number;
   /** Open at this camera instead of the capture point (e.g. where the user was before a rebuild). */
   start?: ViewerPose | null;
   /** Show an Expand button: the scene is expanded from the camera's current pose. */
@@ -81,8 +81,7 @@ export function SplatViewer({ url, objects = [], yaw = 0, upAxisFlip = false, st
         scene.app.on('update', tick);
         cam.current = { scene, fly };
         scene.start();
-        // The video mock's preview is written the same way JST-2 writes files (Y up), so no flip either way by default.
-        const opts = (name: string) => ({ rotation: { x: upAxisFlip ? 180 : 0, y: 0, z: 0 }, position: { x: 0, y: 0, z: 0 }, scale: 1, filename: `${name}.spz`, name });
+        const opts = (name: string) => ({ rotation: { x: 0, y: 0, z: 0 }, position: { x: 0, y: 0, z: 0 }, scale: 1, filename: `${name}.spz`, name });
         // Each layer on its own, with a deadline: one aborted or stalled download (seen when the dev
         // server restarted mid-load) must not leave the whole viewer on "loading" forever. The
         // environment shows as soon as it is in; objects appear as they arrive.
@@ -112,7 +111,7 @@ export function SplatViewer({ url, objects = [], yaw = 0, upAxisFlip = false, st
     })();
     return () => { dead = true; cam.current = null; relight.current?.r.destroy(); relight.current = null; if (tick) scene?.app.off('update', tick); fly?.detach(); for (const e of loaded.values()) e.destroy(); loaded.clear(); scene?.destroy(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, yaw, upAxisFlip, attempt]);
+  }, [key, yaw, attempt]);
 
   useEffect(() => {
     for (const [id, env] of layers.current) env.entity.enabled = !hidden.has(id);
@@ -120,8 +119,8 @@ export function SplatViewer({ url, objects = [], yaw = 0, upAxisFlip = false, st
 
   // Relighting: created once per scene, every loaded layer handed to it once (the environment
   // cropped to its room - a relit area ends at the edge of the box it was built from, so at the
-  // walls that edge does not show), and the light updated on every change.
-  const layerState2 = layerState; // re-run when layers finish loading
+  // walls that edge does not show), and the light updated on every change. `layerState` re-runs it
+  // as layers finish loading.
   useEffect(() => {
     const c = cam.current;
     if (!c || state !== 'ready') return;
@@ -150,7 +149,7 @@ export function SplatViewer({ url, objects = [], yaw = 0, upAxisFlip = false, st
       const box = id === 'environment' && relightBox ? { bounds: { min: { x: relightBox.min[0], y: relightBox.min[1], z: relightBox.min[2] }, max: { x: relightBox.max[0], y: relightBox.max[1], z: relightBox.max[2] } } } : undefined;
       r.add(env, box).then(() => r.setParams(env, { strength: lighting.scene })).catch((e: unknown) => setRelightError((e as Error).message));
     }
-  }, [lighting, relightBox, state, layerState2]);
+  }, [lighting, relightBox, state, layerState]);
 
   const toggle = (id: string) => setHidden((h) => { const n = new Set(h); if (n.has(id)) n.delete(id); else n.add(id); return n; });
 

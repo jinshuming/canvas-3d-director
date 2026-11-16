@@ -5,7 +5,7 @@
  *              near it (COLMAP poses) are stitched into a 360° panorama - real pixels where the
  *              video looked, nothing elsewhere
  *   complete   GPT-image-2 paints only what the video never saw from there (strict composite)
- *   scene      JST-2 custom-pano at the anchor, in the video's own metric frame
+ *   scene      JST-2 custom-pano at the anchor at 1 unit = 1, scaled to metres from the anchor's height
  *   path       JST-2 generate at the video's own cameras further along the walk (position, yaw,
  *              pitch, field of view from COLMAP), each view from every batch so far
  *   rebuild    JST-2 reconstruct from all of them, then the usual gap check and fill
@@ -17,19 +17,21 @@
  * videoScene.ts) would replace all of this with the real frames.
  */
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { basis, c2wToPose, DEG, dirToEquirect, equirectDir, toServiceC2W } from '../core/frame.ts';
 import type { CameraPose, Mat4, Vec3 } from '../core/frame.ts';
 import { scaleSpz } from '../core/gaussians.ts';
-import { distanceToFloor, readSpz } from '../core/spz.ts';
+import { readSpz } from '../core/spz.ts';
 import type { SpzPoints } from '../core/spz.ts';
 import { readPointsPly } from '../core/spzwrite.ts';
-import { autoFill } from './fill.ts';
+import { autoFill, metersPerUnitFromFloor, sessionPose } from './fill.ts';
 import type { FillResult } from './fill.ts';
-import type { Jst2Client } from './jst2.ts';
 import { newSessionId } from './jst2.ts';
+import type { Jst2Client, SceneTask } from './jst2.ts';
+import { openaiImageEdit, resizeImage } from './pano.ts';
 import { encodePng } from './png.ts';
 import type { VideoProgress, VideoSceneResult, VideoViews } from './videoScene.ts';
 import { runPosePipeline } from './videoScene.ts';
@@ -51,8 +53,10 @@ export interface VideoCam {
  * The pose pipeline's frame is OpenCV-style (Y down, the floor at y = floorY). Ours is Y up with
  * the floor at 0: turn 180° about X (y, z negated - a rotation, so handedness is kept) and lift.
  */
+const liftOf = (v: VideoViews) => v.frame.floorY ?? 1.5;
+
 export function camerasFromViews(v: VideoViews): VideoCam[] {
-  const lift = v.frame.floorY ?? 1.5;
+  const lift = liftOf(v);
   return v.views.map((x) => {
     const m = x.c2w;
     const c2w: Mat4 = [
@@ -85,7 +89,7 @@ export function chooseAnchor(cams: VideoCam[], radius = 0.6): { anchor: VideoCam
 }
 
 /** Decode any image to raw RGB at w × h (ffmpeg). */
-export function decodeRgbBytes(bytes: Uint8Array, w: number, h: number): Promise<Uint8Array> {
+function decodeRgbBytes(bytes: Uint8Array, w: number, h: number): Promise<Uint8Array> {
   return new Promise((resolve, reject) => {
     const p = spawn('ffmpeg', ['-v', 'error', '-i', 'pipe:0', '-vf', `scale=${w}:${h}`, '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1']);
     const chunks: Buffer[] = [];
@@ -104,7 +108,7 @@ export function decodeRgbBytes(bytes: Uint8Array, w: number, h: number): Promise
  * anchor's heading. Translation between the frames is ignored (they are within ~0.6 m), each
  * pixel blends the frames that see it, favouring their centres. `weight` > 0 where seen.
  */
-export async function stitchPanorama(cams: VideoCam[], pose: CameraPose, bundle: string, W = 2048, H = 1024): Promise<{ rgb: Uint8Array; weight: Float32Array }> {
+async function stitchPanorama(cams: VideoCam[], pose: CameraPose, bundle: string, W = 2048, H = 1024): Promise<{ rgb: Uint8Array; weight: Float32Array }> {
   const fw = 960, fh = 540;
   const frames = await Promise.all(cams.map(async (c) => decodeRgbBytes(new Uint8Array(await readFile(join(bundle, c.file))), fw, fh)));
   const b = basis(pose);
@@ -143,7 +147,7 @@ export async function stitchPanorama(cams: VideoCam[], pose: CameraPose, bundle:
 }
 
 /** Roll an RGB (or 1-channel) image `shift` columns to the left. */
-export function roll<T extends Uint8Array | Float32Array>(img: T, w: number, h: number, ch: number, shift: number): T {
+function roll<T extends Uint8Array | Float32Array>(img: T, w: number, h: number, ch: number, shift: number): T {
   const out = new (img.constructor as new (n: number) => T)(img.length);
   const s = ((shift % w) + w) % w;
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) for (let c = 0; c < ch; c++) out[(y * w + x) * ch + c] = img[(y * w + ((x + s) % w)) * ch + c]!;
@@ -155,10 +159,9 @@ export function roll<T extends Uint8Array | Float32Array>(img: T, w: number, h: 
  * part (behind the anchor) is one piece in the middle, not split by the seam; the model's pixels
  * are kept only where nothing was seen (feathered), the video's everywhere else.
  */
-export async function completePanorama(cfg: { apiKey?: string; base?: string; model?: string }, input: { rgb: Uint8Array; weight: Float32Array; W: number; H: number; place?: string; signal?: AbortSignal }, f: typeof fetch = (...a) => globalThis.fetch(...a)): Promise<Uint8Array> {
+async function completePanorama(cfg: { apiKey?: string; base?: string; model?: string }, input: { rgb: Uint8Array; weight: Float32Array; W: number; H: number; signal?: AbortSignal }): Promise<Uint8Array> {
   if (!cfg.apiKey) throw new Error('OPENAI_API_KEY is not set.');
   const { W, H } = input;
-  const { resizeImage } = await import('./pano.ts');
   const half = W / 2;
   const rgb = roll(input.rgb, W, H, 3, half), weight = roll(input.weight, W, H, 1, half);
   // Seen = some real weight; the mask is transparent where nothing was, grown 6 px into the seen
@@ -179,19 +182,13 @@ export async function completePanorama(cfg: { apiKey?: string; base?: string; mo
   form.append('size', '1536x1024');
   form.append('n', '1');
   form.append('prompt', [
-    `This is a 360° equirectangular panorama (horizontally squeezed) of a real place${input.place ? ` - ${input.place}` : ''}, photographed from one point. The opaque part is real photographs.`,
+    'This is a 360° equirectangular panorama (horizontally squeezed) of a real place, photographed from one point. The opaque part is real photographs.',
     'Fill the transparent area so the panorama is complete and seamless: the same place continuing - its walls, floor, ceiling or sky, doors and windows, furniture - in the same materials, light, colour and perspective, joining the photographed edges exactly. Equirectangular geometry: straight vertical lines stay vertical, the horizon is the middle row.',
     'Keep the opaque part exactly as it is. No people, no text, no watermark.',
   ].join('\n'));
   form.append('image', new Blob([image as BlobPart], { type: 'image/png' }), 'panorama.png');
   form.append('mask', new Blob([mask as BlobPart], { type: 'image/png' }), 'mask.png');
-  const res = await f(`${(cfg.base ?? 'https://api.openai.com/v1').replace(/\/$/, '')}/images/edits`, { method: 'POST', signal: input.signal, headers: { Authorization: `Bearer ${cfg.apiKey}` }, body: form });
-  const body = await res.json().catch(() => null) as { data?: Array<{ b64_json?: string; url?: string }>; error?: { message?: string } } | null;
-  if (!res.ok) throw new Error(`OpenAI image edit ${res.status}: ${body?.error?.message ?? 'failed'}`);
-  const item = body?.data?.[0];
-  const bytes = item?.b64_json ? new Uint8Array(Buffer.from(item.b64_json, 'base64')) : item?.url ? new Uint8Array(await (await f(item.url)).arrayBuffer()) : null;
-  if (!bytes) throw new Error('OpenAI returned no image.');
-  const painted = await decodeRgbBytes(bytes, W, H);
+  const painted = await decodeRgbBytes(await openaiImageEdit(cfg, form, 'OpenAI image edit', input.signal), W, H);
   // Composite: the video's pixels where seen (feathered over ~12 px), the model's elsewhere; then turn back.
   const a = new Float32Array(W * H);
   for (let i = 0; i < W * H; i++) a[i] = seen[i]!;
@@ -224,7 +221,7 @@ export function pathTargets(cams: VideoCam[], anchor: VideoCam, max = 6, spacing
  * How well the scene follows what the video measured: for each COLMAP point (file frame), the
  * scene's near surface in that direction from the anchor, against the point's distance.
  */
-export function compareWithPoints(scene: SpzPoints, points: Float32Array, W = 256, H = 128): { points: number; within25: number; medianLogError: number } {
+function compareWithPoints(scene: SpzPoints, points: Float32Array, W = 256, H = 128): { points: number; within25: number; medianLogError: number } {
   const b = basis({ position: [0, 0, 0], yaw: 0 });
   const buckets: number[][] = Array.from({ length: W * H }, () => []);
   for (let i = 0; i < scene.count; i++) {
@@ -255,6 +252,7 @@ export interface VideoGenResult {
   sessionId: string;
   anchor: { index: number; file: string; frames: number; coverage: number; position: Vec3; yaw: number };
   metersPerUnit: number;
+  /** The JST-2 session is at 1 unit = 1. Missing on older scenes. */
   sessionInUnits?: boolean;
   pathViews: Array<{ index: number; file: string; position: Vec3; yaw: number; pitch: number; fov: number; batchId: string; image: string | null }>;
   batchIds: string[];
@@ -265,14 +263,14 @@ export interface VideoGenResult {
   seconds: Record<string, number>;
 }
 
+/** Gap-fill views after the rebuild. */
+const MAX_FILLS = 2;
+
 /** The whole route from a pose bundle (views.json + images + points.ply). */
-export async function videoGenerateScene(bundle: string, dir: string, deps: {
+async function videoGenerateScene(bundle: string, dir: string, deps: {
   jst2: Jst2Client;
   openai: { apiKey?: string; base?: string; model?: string };
   maxViews?: number;
-  maxFills?: number;
-  /** A completed panorama from an earlier run, to rebuild without painting again. */
-  panorama?: Uint8Array;
   signal?: AbortSignal;
   onProgress?: (stage: string, message: string) => void;
 }): Promise<VideoGenResult> {
@@ -284,7 +282,7 @@ export async function videoGenerateScene(bundle: string, dir: string, deps: {
   await mkdir(join(dir, 'views'), { recursive: true });
   // Submit and wait, once more on PROCESSING_FAILED (the service says it is retryable; seen on a
   // custom-pano that went through on the second try).
-  const run = async (submit: () => Promise<import('./jst2.ts').SceneTask>) => {
+  const run = async (submit: () => Promise<SceneTask>) => {
     try { return await deps.jst2.wait(await submit(), { signal: deps.signal }); } catch (e) {
       if ((e as { code?: string }).code !== 'PROCESSING_FAILED') throw e;
       p('retry', `JST-2 failed (${(e as Error).message}), trying once more`);
@@ -305,23 +303,21 @@ export async function videoGenerateScene(bundle: string, dir: string, deps: {
 
   // 2. Paint the rest.
   p('complete', 'Painting what the video never saw from the anchor');
-  const pano = deps.panorama ?? await completePanorama(deps.openai, { rgb: st.rgb, weight: st.weight, W, H, signal: deps.signal });
+  const pano = await completePanorama(deps.openai, { rgb: st.rgb, weight: st.weight, W, H, signal: deps.signal });
   await writeFile(join(dir, 'panorama.png'), pano);
   lap('complete');
 
-  // 3. Scale, then the scene at the anchor. The file frame: anchor at the origin, metres, Y up.
+  // 3. The scene at the anchor. The file frame: anchor at the origin, metres, Y up. One build at
+  // 1 unit = 1, measured on itself (the anchor camera's height above the floor), scaled into metres
+  // here; the session stays in units (poses go out divided by the scale).
   const sessionId = newSessionId('sgvg');
   const filePose: CameraPose = { position: [0, 0, 0], yaw: apose.yaw };
-  const height = anchor.pose.position[1];
-  // One build at 1 unit = 1, measured on itself (the anchor camera's height above the floor),
-  // scaled into metres here; the session stays in units (poses go out divided by the scale).
   p('scene', 'Building the scene at the anchor');
   const first = await run(() => deps.jst2.customPano({ sessionId, panorama: pano, mime: 'image/png', c2w: toServiceC2W(filePose), metersPerUnit: 1 }));
   credits += first.credits ?? 0;
   const built = await deps.jst2.download(first.result!.spz.url);
-  const units = distanceToFloor(readSpz(built), [0, 0, 0], [0, -1, 0], { radius: 0.08, maxDistance: 10 });
-  if (!units) throw new Error('Could not find the floor under the anchor in the scene.');
-  const metersPerUnit = Math.round((height / units) * 1000) / 1000;
+  const metersPerUnit = metersPerUnitFromFloor(built, anchor.pose.position[1]);
+  if (metersPerUnit === null) throw new Error('Could not find the floor under the anchor in the scene.');
   p('scale', `1 unit = ${metersPerUnit} m`);
   await writeFile(join(dir, 'initial.spz'), scaleSpz(built, metersPerUnit));
   const batchIds = [first.result!.outputBatch!.batchId];
@@ -336,8 +332,7 @@ export async function videoGenerateScene(bundle: string, dir: string, deps: {
     const pose: CameraPose = { position: rel(c.pose.position), yaw: c.pose.yaw, pitch: c.pose.pitch ?? 0 };
     const fov = Math.round(Math.max(20, Math.min(140, c.hfov)));
     p('path', `View ${i + 1}/${targets.length}: frame ${c.index}, ${pose.position.map((x) => x.toFixed(1)).join(', ')} m, facing ${Math.round(c.pose.yaw)}°`);
-    const sent: CameraPose = { ...pose, position: [pose.position[0] / metersPerUnit, pose.position[1] / metersPerUnit, pose.position[2] / metersPerUnit] };
-    const g = await run(() => deps.jst2.generate({ sessionId, referenceBatchIds: batchIds, targetC2w: toServiceC2W(sent), projection: 'perspective', fov }));
+    const g = await run(() => deps.jst2.generate({ sessionId, referenceBatchIds: batchIds, targetC2w: toServiceC2W(sessionPose(pose, metersPerUnit)), projection: 'perspective', fov }));
     credits += g.credits ?? 0;
     const batch = g.result!.outputBatch!;
     batchIds.push(batch.batchId);
@@ -357,18 +352,17 @@ export async function videoGenerateScene(bundle: string, dir: string, deps: {
     spz = new Uint8Array(scaleSpz(await deps.jst2.download(r.result!.spz.url), metersPerUnit));
   }
   lap('rebuild');
-  let fill: FillResult | null = null;
-  if ((deps.maxFills ?? 2) > 0) {
-    p('fill', 'Looking for gaps');
-    const f = await autoFill(spz, dir, { jst2: deps.jst2, sessionId, batchIds, capture: [0, 0, 0], maxFills: deps.maxFills ?? 2, unit: metersPerUnit, signal: deps.signal, onProgress: (m) => p('fill', m) });
-    fill = f.result; credits += f.result.credits; spz = new Uint8Array(f.spz);
-  }
+  p('fill', 'Looking for gaps');
+  const f = await autoFill(spz, dir, { jst2: deps.jst2, sessionId, batchIds, capture: [0, 0, 0], maxFills: MAX_FILLS, unit: metersPerUnit, signal: deps.signal, onProgress: (m) => p('fill', m) });
+  const fill: FillResult = f.result;
+  credits += f.result.credits;
+  spz = new Uint8Array(f.spz);
   await writeFile(join(dir, 'scene.spz'), spz);
   lap('fill');
 
   // 6. Against what the video measured: COLMAP's points, in the file frame.
   const raw = readPointsPly(new Uint8Array(await readFile(join(bundle, v.points))));
-  const lift = v.frame.floorY ?? 1.5;
+  const lift = liftOf(v);
   const pts = new Float32Array(raw.positions.length);
   for (let i = 0; i < raw.positions.length / 3; i++) {
     pts[i * 3] = raw.positions[i * 3]! - anchor.pose.position[0];
@@ -385,7 +379,6 @@ export async function videoGenerateScene(bundle: string, dir: string, deps: {
     files: { stitched: 'anchor-stitched.png', panorama: 'panorama.png', initial: 'initial.spz', scene: 'scene.spz' },
     seconds,
   };
-  await writeFile(join(dir, 'result.json'), JSON.stringify(result, null, 2));
   p('done', `Scene ready: ${views.length} views along the walk, ${Math.round(verify.within25 * 100)}% of the video's points within 25%`);
   return result;
 }
@@ -395,7 +388,6 @@ export type VideoGenSceneResult = VideoGenResult & Pick<VideoSceneResult, 'stats
 
 /** Video file → poses (reused when the bundle is already there and `reusePoses`) → the generate route. */
 export async function videoToSceneByGenerate(video: string, dir: string, deps: Parameters<typeof videoGenerateScene>[2] & { reusePoses?: boolean; square?: number; onPoseProgress?: VideoProgress }): Promise<VideoGenSceneResult> {
-  const { existsSync } = await import('node:fs');
   const bundle = join(dir, 'bundle');
   const v: VideoViews = deps.reusePoses && existsSync(join(bundle, 'views.json'))
     ? JSON.parse(await readFile(join(bundle, 'views.json'), 'utf8')) as VideoViews

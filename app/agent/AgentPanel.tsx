@@ -147,8 +147,9 @@ function group(items: ChatItem[]): Group[] {
     else if (it.kind === 'tool') out.push({ kind: 'tools', items: [it], last: false });
     else out.push({ kind: 'line', item: it });
   }
-  const lastTools = [...out].reverse().find((g) => g.kind === 'tools');
-  if (lastTools && lastTools.kind === 'tools' && out[out.length - 1] === lastTools) lastTools.last = true;
+  // Only a run of tools at the very end is still unfolding.
+  const tail = out[out.length - 1];
+  if (tail?.kind === 'tools') tail.last = true;
   return out;
 }
 

@@ -9,6 +9,7 @@ import { useSyncExternalStore } from 'react';
 import { generateScene, reconstructScene } from '../../scenegen/web/runner.ts';
 import type { RunStatus } from '../../scenegen/web/runner.ts';
 import { api as sg } from '../../scenegen/web/api.ts';
+import type { SceneStatus } from './SceneNodes.tsx';
 
 export interface Media { blob: Blob; url: string; name: string }
 export interface SceneDraft {
@@ -22,7 +23,7 @@ export interface SceneDraft {
   /** Bumped when a run starts or ends, so the card fetches its project again. */
   version: number;
   /** What the card shows (it knows the project): the canvas draws the composer only while it waits. */
-  status?: 'input' | 'generating' | 'done' | 'failed';
+  status?: SceneStatus;
   /** The project already has a video on the server (场景重建). */
   serverVideo?: boolean;
   /** When the run was submitted: `local` stays until the card sees a job started after it. */
@@ -33,7 +34,7 @@ const EMPTY: SceneDraft = { text: '', image: null, video: null, objects: true, l
 const drafts = new Map<string, SceneDraft>();
 const listeners = new Set<() => void>();
 
-export function getDraft(nodeId: string, text = ''): SceneDraft {
+function getDraft(nodeId: string, text = ''): SceneDraft {
   let d = drafts.get(nodeId);
   if (!d) { d = { ...EMPTY, text }; drafts.set(nodeId, d); }
   return d;

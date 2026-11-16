@@ -5,7 +5,7 @@
  * same direction. Also where the floor ended up.
  */
 import { basis, dirToEquirect, sub } from './frame.ts';
-import type { CameraPose, Vec3 } from './frame.ts';
+import type { CameraPose } from './frame.ts';
 import type { EquirectBuffers } from './render.ts';
 import { OPEN_CLASSES } from './render.ts';
 import type { SpzPoints } from './spz.ts';
@@ -24,30 +24,42 @@ export interface Alignment {
   objectsWithin25: number;
 }
 
-export function measureAlignment(points: SpzPoints, blockout: EquirectBuffers, pose: CameraPose): Alignment {
-  const { width: W, height: H } = blockout;
+/**
+ * The splat centres' distances from the capture point, binned by direction on a W × H equirect grid
+ * (at most 64 per bin; only rows `keepRow` accepts).
+ */
+function distanceBins(points: SpzPoints, W: number, H: number, pose: CameraPose, keepRow: (iv: number) => boolean = () => true): Map<number, number[]> {
   const b = basis(pose);
   const o = pose.position;
-  // Per bin: a small sample of distances, from which the 10th percentile is the near surface.
-  const near = new Float32Array(W * H).fill(Infinity);
-  const buckets: number[][] = Array.from({ length: W * H }, () => []);
+  const bins = new Map<number, number[]>();
   for (let i = 0; i < points.count; i++) {
     if (points.alphas[i]! < 0.35) continue;
-    const p: Vec3 = [points.positions[i * 3]!, points.positions[i * 3 + 1]!, points.positions[i * 3 + 2]!];
-    const d = sub(p, o);
+    const d = sub([points.positions[i * 3]!, points.positions[i * 3 + 1]!, points.positions[i * 3 + 2]!], o);
     const dist = Math.hypot(...d);
     if (dist < 0.05 || dist > 200) continue;
     const [u, v] = dirToEquirect([d[0] / dist, d[1] / dist, d[2] / dist], W, H, b);
-    const iu = ((Math.round(u) % W) + W) % W, iv = Math.max(0, Math.min(H - 1, Math.round(v)));
-    const bk = buckets[iv * W + iu]!;
+    const iv = Math.max(0, Math.min(H - 1, Math.round(v)));
+    if (!keepRow(iv)) continue;
+    const k = iv * W + (((Math.round(u) % W) + W) % W);
+    const bk = bins.get(k) ?? [];
     if (bk.length < 64) bk.push(dist);
+    bins.set(k, bk);
   }
-  for (let i = 0; i < W * H; i++) {
-    const bk = buckets[i]!;
-    if (bk.length < 4) continue;
-    bk.sort((a, c) => a - c);
-    near[i] = bk[Math.floor(bk.length * 0.1)]!;
-  }
+  return bins;
+}
+
+/** A bin's near surface: the 10th percentile of its distances (null under 4 samples). Sorts `bk`. */
+function nearSurface(bk: number[]): number | null {
+  if (bk.length < 4) return null;
+  bk.sort((a, c) => a - c);
+  return bk[Math.floor(bk.length * 0.1)]!;
+}
+
+export function measureAlignment(points: SpzPoints, blockout: EquirectBuffers, pose: CameraPose): Alignment {
+  const { width: W, height: H } = blockout;
+  const o = pose.position;
+  const near = new Float32Array(W * H).fill(Infinity);
+  for (const [k, bk] of distanceBins(points, W, H, pose)) near[k] = nearSurface(bk) ?? Infinity;
   const errs: number[] = [];
   let ok = 0, objN = 0, objOk = 0;
   // What a window, a door or the sky shows has no blockout distance (it is a placeholder): leave it out.
@@ -87,30 +99,14 @@ export function measureAlignment(points: SpzPoints, blockout: EquirectBuffers, p
  */
 export function horizontalScale(points: SpzPoints, blockout: EquirectBuffers, pose: CameraPose): number | null {
   const { width: W, height: H } = blockout;
-  const b = basis(pose);
-  const o = pose.position;
   const v0 = Math.floor(H * 0.42), v1 = Math.ceil(H * 0.58);
-  const buckets = new Map<number, number[]>();
-  for (let i = 0; i < points.count; i++) {
-    if (points.alphas[i]! < 0.35) continue;
-    const d = sub([points.positions[i * 3]!, points.positions[i * 3 + 1]!, points.positions[i * 3 + 2]!], o);
-    const dist = Math.hypot(...d);
-    if (dist < 0.05 || dist > 200) continue;
-    const [u, v] = dirToEquirect([d[0] / dist, d[1] / dist, d[2] / dist], W, H, b);
-    const iv = Math.round(v);
-    if (iv < v0 || iv > v1) continue;
-    const k = iv * W + (((Math.round(u) % W) + W) % W);
-    const bk = buckets.get(k) ?? [];
-    if (bk.length < 64) bk.push(dist);
-    buckets.set(k, bk);
-  }
   const wall = new Set(blockout.classes.map((c, k) => (c === 'wall' ? k : -1)).filter((k) => k >= 0));
   const ratios: number[] = [];
-  for (const [k, bk] of buckets) {
+  for (const [k, bk] of distanceBins(points, W, H, pose, (iv) => iv >= v0 && iv <= v1)) {
     const bt = blockout.dist[k]!;
-    if (bk.length < 4 || !Number.isFinite(bt) || blockout.obj[k]! >= 0 || !wall.has(blockout.cls[k]!)) continue;
-    bk.sort((a, c) => a - c);
-    ratios.push(bk[Math.floor(bk.length * 0.1)]! / bt);
+    if (!Number.isFinite(bt) || blockout.obj[k]! >= 0 || !wall.has(blockout.cls[k]!)) continue;
+    const st = nearSurface(bk);
+    if (st !== null) ratios.push(st / bt);
   }
   if (ratios.length < 20) return null;
   ratios.sort((a, c) => a - c);

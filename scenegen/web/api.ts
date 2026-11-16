@@ -24,15 +24,11 @@ export interface Project {
 }
 export interface Conditions { capture: CameraPose; range: { zMin: number; zMax: number }; legend: Array<{ cls: string; color: number[]; share: number }>; prompt: string; issues: Issue[]; files: { depth: string; semantic: string; shaded: string } }
 
-/** Where the dev server is: '' in the page; a full origin when this client runs in Node (the eval harness). */
-let origin = '';
-export function setApiOrigin(o: string): void { origin = o.replace(/\/$/, ''); }
-
 type RawBody = Blob | Uint8Array;
 const typeOf = (b: RawBody, fallback: string) => (b instanceof Blob && b.type ? b.type : fallback);
 
 async function call<T>(method: string, path: string, body?: unknown, raw?: { body: RawBody; type: string }): Promise<T> {
-  const res = await fetch(`${origin}/scenegen/api${path}`, {
+  const res = await fetch(`/scenegen/api${path}`, {
     method,
     headers: raw ? { 'Content-Type': raw.type } : body === undefined ? {} : { 'Content-Type': 'application/json' },
     body: raw ? (raw.body as BodyInit) : body === undefined ? undefined : JSON.stringify(body),
@@ -65,10 +61,10 @@ export const api = {
   cancel: (id: string) => call<{ ok: true }>('POST', `/projects/${id}/cancel`),
   exportScene: (id: string) => call<{ sceneId: string }>('POST', `/projects/${id}/export`),
   /** One streamed model turn for the layout agent (the loop's `respond`). */
-  respondAgent: (body: unknown, signal?: AbortSignal) => fetch(`${origin}/scenegen/api/agent/respond`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal }),
+  respondAgent: (body: unknown, signal?: AbortSignal) => fetch(`/scenegen/api/agent/respond`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal }),
 };
 
-export const file = (id: string, path: string, bust?: string | number) => `${origin}/scenegen/files/${id}/${path}${bust ? `?t=${bust}` : ''}`;
+export const file = (id: string, path: string, bust?: string | number) => `/scenegen/files/${id}/${path}${bust ? `?t=${bust}` : ''}`;
 
 /** An image URL as a data: URL, scaled down to `maxW` wide (JPEG) - for the model's eyes. */
 export async function toDataUrl(src: string | Blob, maxW = 1024): Promise<string> {

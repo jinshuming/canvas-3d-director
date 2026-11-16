@@ -3,13 +3,18 @@
  * (npm run dev). Each case goes through the real pipeline and spends real
  * credits: the layout agent (OpenAI), the panorama (GPT-image-2), JST-2.
  *
- *   npx tsx scenegen/eval/e2e.mts <out-dir> [case-id ...]
+ *   SCENEGEN_E2E_VIDEOS=<dir> npx tsx scenegen/eval/e2e.mts <out-dir> [case-id | kind ...]
+ *
+ * SCENEGEN_E2E_VIDEOS is the folder holding the walkthrough videos the image and
+ * video cases name (e.g. livingRoom-explore.mp4); the text cases do not need it.
+ * SCENEGEN_BASE overrides the dev server (default http://localhost:5193),
+ * E2E_CONCURRENCY the number of cases run at once (default 3).
  *
  * Kinds:
  *   text          prompt → agent → blockout → panorama → JST-2 → gap fill
  *   image         picture → agent → ... (same)
  *   video-layout  video keyframes → agent → ... (same)
- *   video-poses   video → COLMAP poses → posed-images (mock until JST-2 has it) → scene
+ *   video-poses   video → COLMAP poses → the server's default video route (videoGen.ts) → scene
  *
  * Writes <out-dir>/<case-id>/ (images, result.json) and <out-dir>/results.json.
  */
@@ -21,15 +26,24 @@ import { runAgentTurn } from '../agent/loop.ts';
 import type { ChatItem, TurnStats } from '../agent/loop.ts';
 import { checkLayout } from '../core/layout.ts';
 import { projectHost } from '../web/agentHost.ts';
-import { api, setApiOrigin } from '../web/api.ts';
+import { api } from '../web/api.ts';
+import type { Job as StartedJob } from '../web/api.ts';
 
 const BASE = process.env.SCENEGEN_BASE ?? 'http://localhost:5193';
-setApiOrigin(BASE);
-const VIDEOS = '/Users/chenmo/Desktop/Dev/P.I.N.O.C./handoff/explore-videos';
+// The project API client (web/api.ts) uses page-relative URLs: resolve them against the dev server.
+const nodeFetch = globalThis.fetch;
+globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => nodeFetch(typeof input === 'string' && input.startsWith('/') ? `${BASE}${input}` : input, init)) as typeof fetch;
+
+/** A case's input video, from the SCENEGEN_E2E_VIDEOS folder. */
+function videoPath(name: string): string {
+  const dir = process.env.SCENEGEN_E2E_VIDEOS;
+  if (!dir) throw new Error('Set SCENEGEN_E2E_VIDEOS to the folder with the test videos (needed by the image and video cases).');
+  return join(dir, name);
+}
 
 interface Case { id: string; kind: 'text' | 'image' | 'video-layout' | 'video-poses'; title: string; prompt?: string; image?: string; imageAt?: number; video?: string }
 
-export const CASES: Case[] = [
+const CASES: Case[] = [
   { id: 'text-1', kind: 'text', title: '北欧客厅', prompt: '一间北欧风客厅：靠北墙一张浅灰色三人沙发，前面一张橡木矮茶几和一块米色地毯，东墙一扇大窗，西墙一个白色书架，窗边一盆琴叶榕，沙发对面是电视柜和电视。午后阳光。' },
   { id: 'text-2', kind: 'text', title: '欧洲小镇广场', prompt: '一个欧洲小镇的石板广场：中央一座石头喷泉，北边和东西两侧是三四层的彩色老房子，广场上几棵梧桐树、两张长椅朝向喷泉、一盏铸铁路灯。晴朗的上午。' },
   { id: 'text-3', kind: 'text', title: '工业风咖啡馆', prompt: '一家工业风小咖啡馆：一条靠墙的长吧台带三把高脚凳，吧台后面是放咖啡器具的柜子，店里三张小圆桌各配两把椅子，墙角有绿植，南墙是落地窗。暖黄色灯光，傍晚。' },
@@ -58,7 +72,7 @@ function grabFrame(video: string, at: number, out: string): Uint8Array {
 }
 
 async function fetchBytes(url: string): Promise<Uint8Array> {
-  const r = await fetch(url.startsWith('http') ? url : `${BASE}${url}`);
+  const r = await fetch(url);
   if (!r.ok) throw new Error(`GET ${url}: ${r.status}`);
   return new Uint8Array(await r.arrayBuffer());
 }
@@ -79,13 +93,13 @@ async function runLayoutCase(c: Case, dir: string, log: (m: string) => void) {
   const pics: string[] = [];
   const inputs: string[] = [];
   if (c.kind === 'image') {
-    const bytes = grabFrame(join(VIDEOS, c.video!), c.imageAt ?? 2, join(dir, 'input.jpg'));
+    const bytes = grabFrame(videoPath(c.video!), c.imageAt ?? 2, join(dir, 'input.jpg'));
     await api.reference(proj.id, bytes, 'image/jpeg');
     pics.push(toDataUrl(bytes, 1280));
     inputs.push('input.jpg');
   }
   if (c.kind === 'video-layout') {
-    const k = await api.layoutVideo(proj.id, new Uint8Array(readFileSync(join(VIDEOS, c.video!))));
+    const k = await api.layoutVideo(proj.id, new Uint8Array(readFileSync(videoPath(c.video!))));
     for (const f of k.frames) {
       const b = await fetchBytes(f.url);
       writeFileSync(join(dir, f.file), b);
@@ -95,9 +109,11 @@ async function runLayoutCase(c: Case, dir: string, log: (m: string) => void) {
   }
   const layout = proj.layout;
   let generateCalls = 0;
+  let started: StartedJob | null = null;
   const host = projectHost(proj.id, layout, {
     toDataUrl: async (url, width) => toDataUrl(await fetchBytes(url), width),
     generateBody: () => { generateCalls++; return { provider: 'openai-image', maxFills: 'auto' }; },
+    onJob: (j) => { started = j; },
   });
   const items: ChatItem[] = [];
   let stats: TurnStats | null = null;
@@ -114,8 +130,8 @@ async function runLayoutCase(c: Case, dir: string, log: (m: string) => void) {
   const agentSeconds = (Date.now() - ta) / 1000;
   const issues = checkLayout(layout);
   // The agent is told to generate; if it did not, generate now so the rest of the pipeline is tested.
-  if (!host.job() && layout.objects.length) { log('agent did not start generation; starting it'); await host.generate(); }
-  if (!host.job()) return { id: c.id, kind: c.kind, title: c.title, ok: false, error: agentError ?? 'No layout to generate from.', inputs, agent: { seconds: agentSeconds, stats }, layout: { objects: layout.objects.length, issues: issues.map((i) => i.message) } };
+  if (!started && layout.objects.length) { log('agent did not start generation; starting it'); await host.generate(); }
+  if (!started) return { id: c.id, kind: c.kind, title: c.title, ok: false, error: agentError ?? 'No layout to generate from.', inputs, agent: { seconds: agentSeconds, stats }, layout: { objects: layout.objects.length, issues: issues.map((i) => i.message) } };
   let lastStage = '';
   const { job, result } = await waitJob(proj.id, (j) => { if (j.stage !== lastStage) { lastStage = j.stage; log(`${j.stage}: ${j.message}`); } });
   const ok = job.status === 'done' && Boolean(result);
@@ -138,7 +154,7 @@ async function runLayoutCase(c: Case, dir: string, log: (m: string) => void) {
 async function runPosesCase(c: Case, dir: string, log: (m: string) => void) {
   const t0 = Date.now();
   const proj = await api.create('video', { title: c.title });
-  await api.video(proj.id, new Uint8Array(readFileSync(join(VIDEOS, c.video!))));
+  await api.video(proj.id, new Uint8Array(readFileSync(videoPath(c.video!))));
   await api.videoRun(proj.id, {});
   let lastStage = '';
   const { job, result } = await waitJob(proj.id, (j) => { if (j.stage !== lastStage) { lastStage = j.stage; log(`${j.stage}: ${j.message}`); } });

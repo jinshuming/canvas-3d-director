@@ -2,11 +2,11 @@
  * One streamed model turn, relayed to the OpenAI Responses API. The key stays
  * on the server; the page runs the tools and sends their results back as the
  * next turn's input, chained by previous_response_id. Shared by the director's
- * World agent and the scene generator's layout agent - only the instructions differ.
+ * agent and the scene generator's layout agent - only the instructions differ.
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
-export interface RelayConfig { apiKey?: string; base?: string; model: string; instructions: string }
+interface RelayConfig { apiKey?: string; base?: string; model: string; instructions: string }
 export interface TurnBody { input: unknown; previous_response_id?: string; tools: unknown[]; tool_choice?: string }
 
 const fail = (status: number, message: string) => Object.assign(new Error(message), { status });

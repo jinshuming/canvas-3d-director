@@ -2,16 +2,25 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import type { Gaussians } from './gaussians.ts';
-import { bounds, transformGaussians } from './gaussians.ts';
-import { bodyIndices, mul, placeObject, rotY } from './place.ts';
+import { bounds, mul, rotY, transformGaussians } from './gaussians.ts';
+import { bodyIndices, placeObject } from './place.ts';
 import { supportTilt } from './seat.ts';
 import type { LayoutObject } from './types.ts';
+
+/** Seeded random numbers (mulberry32), so every run tests the same points. */
+let seed = 7;
+function rand(): number {
+  seed = (seed + 0x6d2b79f5) | 0;
+  let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
 
 /** A table, 1.4 wide (x) × 0.75 high × 0.8 deep (z): a top slab and four legs, plus floaters and a floor patch. */
 function table(extra = true): Gaussians {
   const pts: number[] = [];
   const box = (x0: number, x1: number, y0: number, y1: number, z0: number, z1: number, n: number) => {
-    for (let i = 0; i < n; i++) pts.push(x0 + Math.random() * (x1 - x0), y0 + Math.random() * (y1 - y0), z0 + Math.random() * (z1 - z0));
+    for (let i = 0; i < n; i++) pts.push(x0 + rand() * (x1 - x0), y0 + rand() * (y1 - y0), z0 + rand() * (z1 - z0));
   };
   box(-0.7, 0.7, 0.7, 0.75, -0.4, 0.4, 20000);
   for (const [x, z] of [[-0.65, -0.35], [0.65, -0.35], [-0.65, 0.35], [0.65, 0.35]]) box(x! - 0.03, x! + 0.03, 0, 0.7, z! - 0.03, z! + 0.03, 2500);
@@ -75,7 +84,6 @@ test('an object lying on its side is stood up; a quarter turn is taken when the 
   // On its side (up = +x), then a quarter turn off (width and depth swapped).
   transformGaussians(g, mul([[0, -1, 0], [1, 0, 0], [0, 0, 1]], rotY(-60 + 90)), 2, [0, 0, 0]);
   const r = placeObject(g, o, { capture });
-  if (process.env.DBG) console.log(JSON.stringify(r.result));
   assert.notEqual(r.result.up, 'kept');
   assert.ok(Math.abs(Math.abs(r.result.yawDeg) - 90) < 5, `yaw ${r.result.yawDeg}`);
   check(r.g, o, capture);

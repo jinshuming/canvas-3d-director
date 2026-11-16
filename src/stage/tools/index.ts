@@ -13,7 +13,7 @@ import { fileToWorldPoint, placeWalkScene } from '../../walk/placement.js';
 import { DEFAULT_LIGHTING, LIGHT_PRESET_LABEL, LIGHT_PRESET_NAMES, LIGHT_PRESETS, normalizeLighting, presetByName } from '../lighting.js';
 import { fillBlock, fillPoseToFile, sceneVersion } from '../scenefill.js';
 import type { CameraKey, Easing, Interpolation, StageAspect, StageCharacter, StageClip, StageDoc, StageMove, StageShot, Vec3Tuple } from '../types.js';
-import { ASPECTS } from '../types.js';
+import { ASPECTS, sceneFromLibrary } from '../types.js';
 import type { AssetKind, AssetRef, GenerationJob, StageToolHost, ToolResult } from './host.js';
 import { contactSheet, povCamera, renderStill, settle, toBase64Jpeg, topDownCamera } from './look.js';
 
@@ -641,7 +641,8 @@ export const STAGE_TOOLS: StageTool[] = [
       const a = await findAsset(host, 'scene', i.scene);
       host.update((d) => ({
         ...d,
-        scene: { name: a.name, url: a.url, placement: null, viggle: a.viggle ?? null, panoramaUrl: a.panoramaUrl ?? null, ...(a.objectsUrl ? { objectsUrl: a.objectsUrl } : {}), ...(a.relight ? { relight: a.relight } : {}) },
+        scene: sceneFromLibrary(a),
+        // A scene made with a light brings it to a world that has none yet.
         ...(!d.lighting && a.lighting ? { lighting: a.lighting } : {}),
       }));
       const r = host.renderer;

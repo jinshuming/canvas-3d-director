@@ -1,18 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { api as sg } from '../../scenegen/web/api.ts';
 import { api } from '../api.ts';
-import type { WorldSummary } from '../shared/world.ts';
 import type { IconName } from '../icons.tsx';
 import { Icon } from '../icons.tsx';
 import { navigate, worldPath } from '../router.ts';
-import './canvas.css';
-import { api as sg } from '../../scenegen/web/api.ts';
-import type { NodeInputs } from './SceneNodes.tsx';
-import { SceneComposer } from './SceneComposer.tsx';
-import { SceneGenCard, SceneReconCard } from './SceneNodes.tsx';
-import { useDraft } from './sceneDrafts.ts';
+import type { WorldSummary } from '../shared/world.ts';
 import type { CanvasNode, CanvasState, NodeKind } from './model.ts';
-import { loadCanvas, newId, NODE_LABEL, NODE_SIZE, saveCanvas } from './model.ts';
+import { loadCanvas, newId, NODE_LABEL, NODE_SIZE, saveCanvas, worldNodeAfter } from './model.ts';
+import { SceneComposer } from './SceneComposer.tsx';
+import { useDraft } from './sceneDrafts.ts';
+import type { NodeInputs } from './SceneNodes.tsx';
+import { SceneGenCard, SceneReconCard } from './SceneNodes.tsx';
+import './canvas.css';
 
 /**
  * The canvas: the board and its nodes. The real ones are 导演台 (Cinema Studio, which opens
@@ -165,15 +165,17 @@ export function CanvasPage() {
     const [w, h] = NODE_SIZE[kind];
     const c = centre();
     const node: CanvasNode = { id: newId(), kind, x: c.x - w / 2 + (Math.random() - 0.5) * 60, y: c.y - h / 2 + (Math.random() - 0.5) * 60, w, h, ...extra };
+    // A new scene or World node gets a numbered title: 场景生成 3, 导演台 2.
+    const title = `${NODE_LABEL[kind]} ${state.nodes.filter((n) => n.kind === kind).length + 1}`;
     if ((kind === 'scenegen' || kind === 'scenerecon') && !node.projectId) {
       // Every scene node is its own scene generator project, kept on the server.
-      const p = await sg.create(kind === 'scenerecon' ? 'video' : 'text', { title: kind === 'scenerecon' ? `场景重建 ${state.nodes.filter((n) => n.kind === kind).length + 1}` : `场景生成 ${state.nodes.filter((n) => n.kind === kind).length + 1}` });
+      const p = await sg.create(kind === 'scenerecon' ? 'video' : 'text', { title });
       node.projectId = p.id;
       node.title = p.title;
     }
     if (kind === 'world' && !node.worldId) {
       // Every World node is its own project file.
-      const w = await api.createWorld({ title: `导演台 ${state.nodes.filter((n) => n.kind === 'world').length + 1}` });
+      const w = await api.createWorld({ title });
       node.worldId = w.id;
       node.title = w.title;
       setWorlds((m) => new Map(m ?? []).set(w.id, { id: w.id, title: w.title, createdAt: w.createdAt, updatedAt: w.updatedAt, coverUrl: null, sceneName: null, characters: 0, shots: 0, prompts: 0, lastPrompt: null, origin: w.origin }));
@@ -208,8 +210,7 @@ export function CanvasPage() {
   };
   /** A scene node's result went to a new World: put a World node to its right, wired from it. */
   const addWorldAfter = (from: CanvasNode, w: { worldId: string; title: string }) => {
-    const [nw, nh] = NODE_SIZE.world;
-    const node: CanvasNode = { id: newId(), kind: 'world', x: from.x + from.w + 120, y: from.y + (from.h - nh) / 2, w: nw, h: nh, worldId: w.worldId, title: w.title };
+    const node = worldNodeAfter(from, w.worldId, w.title);
     setState((s) => ({ ...s, nodes: [...s.nodes, node], edges: [...s.edges, { from: from.id, to: node.id }] }));
     void api.listWorlds().then((list) => setWorlds(new Map(list.map((x) => [x.id, x])))).catch(() => {});
     setSelected(node.id);
@@ -246,9 +247,8 @@ export function CanvasPage() {
           </svg>
           {state.nodes.map((n) => (
             <NodeView key={n.id} node={n} world={n.worldId ? worlds?.get(n.worldId) ?? (worlds ? null : undefined) : null} selected={selected === n.id} onPointerDown={(e) => onNodePointerDown(e, n)}
-              onText={(text) => setState((s) => ({ ...s, nodes: s.nodes.map((k) => (k.id === n.id ? { ...k, text } : k)) }))}
-              inputs={n.kind === 'scenegen' || n.kind === 'scenerecon' ? inputsOf(n.id) : undefined}
-              onPatch={(patch) => patchNode(n.id, patch)}
+              onText={(text) => patchNode(n.id, { text })}
+              inputs={n.kind === 'scenegen' || n.kind === 'scenerecon' ? inputsOf(n.id) : NO_INPUTS}
               onSendToWorld={(w) => addWorldAfter(n, w)} />
           ))}
         </div>
@@ -335,7 +335,9 @@ function MenuRow({ icon, title, sub, hot, dot, badge, chevron, onClick }: { icon
 const KIND_ICON: Record<NodeKind, IconName> = { image: 'image', video: 'video', '3d': 'box', text: 'text', previs: 'previs', world: 'globe', scenegen: 'scene', scenerecon: 'camera' };
 
 /** `world`: the World node's project - undefined while loading, null when it is gone. */
-function NodeView({ node: n, world, selected, onPointerDown, onText, inputs, onPatch, onSendToWorld }: { node: CanvasNode; world: WorldSummary | null | undefined; selected: boolean; onPointerDown: (e: React.PointerEvent) => void; onText: (t: string) => void; inputs?: NodeInputs; onPatch: (p: Partial<CanvasNode>) => void; onSendToWorld: (w: { worldId: string; title: string }) => void }) {
+const NO_INPUTS: NodeInputs = { text: '', imageSrc: null };
+
+function NodeView({ node: n, world, selected, onPointerDown, onText, inputs, onSendToWorld }: { node: CanvasNode; world: WorldSummary | null | undefined; selected: boolean; onPointerDown: (e: React.PointerEvent) => void; onText: (t: string) => void; inputs: NodeInputs; onSendToWorld: (w: { worldId: string; title: string }) => void }) {
   return (
     <div className={`cv-node cv-${n.kind} ${selected ? 'selected' : ''}`} style={{ left: n.x, top: n.y, width: n.w, height: n.h }} onPointerDown={onPointerDown}
       onDoubleClick={() => { if (n.kind === 'world' && world) navigate(worldPath(world.id, n.id)); }}>
@@ -350,8 +352,8 @@ function NodeView({ node: n, world, selected, onPointerDown, onText, inputs, onP
       {n.kind === 'text' && <textarea className="cv-node-text" placeholder="Write something…" value={n.text ?? ''} onChange={(e) => onText(e.target.value)} />}
       {n.kind === 'previs' && <div className="cv-node-empty cv-col"><Icon name="previs" size={20} /><span className="cv-mini-btn">Enter Studio</span></div>}
       {n.kind === 'world' && <WorldCard node={n} world={world} />}
-      {n.kind === 'scenegen' && <SceneGenCard node={n} inputs={inputs ?? { text: '', imageSrc: null }} onPatch={onPatch} onSendToWorld={onSendToWorld} />}
-      {n.kind === 'scenerecon' && <SceneReconCard node={n} inputs={inputs ?? { text: '', imageSrc: null }} onPatch={onPatch} onSendToWorld={onSendToWorld} />}
+      {n.kind === 'scenegen' && <SceneGenCard node={n} inputs={inputs} onSendToWorld={onSendToWorld} />}
+      {n.kind === 'scenerecon' && <SceneReconCard node={n} inputs={inputs} onSendToWorld={onSendToWorld} />}
     </div>
   );
 }
@@ -376,7 +378,7 @@ function WorldCard({ node, world }: { node: CanvasNode; world: WorldSummary | nu
   );
 }
 
-/** The board a first visit opens on: a canvas board plus a World. */
+/** The board a first visit opens on (a World node joins it once one with a scene exists). */
 function seed(): CanvasState {
   const img: CanvasNode = { id: 'seed_img', kind: 'image', x: 140, y: 320, w: 230, h: 154 };
   const video: CanvasNode = { id: 'seed_video', kind: 'video', x: 460, y: 150, w: 190, h: 106 };
@@ -391,10 +393,9 @@ function seed(): CanvasState {
 }
 
 /**
- * The canvas UI's scale: fixed proportions at any window size (its top
- * pills are about 5.6% of the window height), so a small window shows the
- * same layout, smaller. 1 at a
- * 1000 × 1600 window and up; never below 0.5, about where text stops being readable.
+ * The canvas UI's scale: fixed proportions at any window size, so a small window shows the same
+ * layout, smaller. 1 at a 1600 × 1000 window and up; never below 0.5, about where text stops being
+ * readable.
  */
 function useUiScale(): number {
   const read = () => Math.min(1, Math.max(0.5, Math.min(innerHeight / 1000, innerWidth / 1600)));

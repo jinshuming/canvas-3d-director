@@ -2,16 +2,22 @@
  * Key objects as their own 3D assets: for each key object of the blockout, a
  * perspective crop of the panorama looking at it (the blockout says exactly
  * where it is), the blockout's box projected into that crop as the prompt, and
- * SAM 3D (fal) turning the crop into a Gaussian-splat object. Its shape and
- * heading are trusted; size and position come from the blockout (fit.ts).
+ * SAM 3D (fal) turning the crop into a Gaussian-splat object, roughly fitted
+ * to the blockout box (core/fit.ts). The scene's placement (seatScene.ts)
+ * refines it every time the scene is composed.
  */
 import { spawn } from 'node:child_process';
-import { writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 
+import { importanceOf } from '../core/capture.ts';
+import { fitToBlockout } from '../core/fit.ts';
 import { basis, dot, sub } from '../core/frame.ts';
 import type { CameraPose, Vec3 } from '../core/frame.ts';
+import { readPlyGaussians, thinGaussians, writeSpzGaussians } from '../core/gaussians.ts';
 import { objectBounds } from '../core/geometry.ts';
-import { importanceOf } from '../core/capture.ts';
+import type { PlaceResult } from '../core/place.ts';
+import type { SeatResult } from '../core/seat.ts';
 import type { Layout, LayoutObject } from '../core/types.ts';
 
 export interface CropView {
@@ -24,7 +30,7 @@ export interface CropView {
 }
 
 /** How close to a wall (metres) an object's back - or two of its sides, in a corner - has to be to count as against it. */
-export const WALL_GAP = 0.2;
+const WALL_GAP = 0.2;
 
 /**
  * Against a wall with nothing showing behind it: its BACK (the side away from where it faces) within
@@ -56,7 +62,7 @@ export function wallBacked(o: LayoutObject, room: Layout['room']): boolean {
  * Never flat things (rugs, water), things standing on others (they go with what they stand on) or
  * things against a wall (painted into the panorama: see wallBacked). At most `max`.
  */
-export function keyObjects(layout: Layout, max = 12): LayoutObject[] {
+function keyObjects(layout: Layout, max = 12): LayoutObject[] {
   const flat = new Set(['rug', 'road', 'water', 'fence']);
   const ok = (o: LayoutObject) => !flat.has(o.type) && !o.on && o.size[1] > 0.25 && !wallBacked(o, layout.room);
   const rank = (o: LayoutObject) => (o.key ? 10 : 0) + importanceOf(layout, layout.objects.indexOf(o));
@@ -86,8 +92,9 @@ export function cropFor(o: LayoutObject, capture: CameraPose, size = 1024): Crop
   const pose: CameraPose = { position: capture.position, yaw, pitch };
   const cam = basis(pose);
   // FOV: the box's angular extent from the camera axis, with room around it for context.
+  const box = corners(o);
   let half = 0;
-  for (const p of corners(o)) {
+  for (const p of box) {
     const v = sub(p, capture.position);
     const z = dot(v, cam.forward);
     if (z <= 0.05) { half = 60; break; }
@@ -96,7 +103,7 @@ export function cropFor(o: LayoutObject, capture: CameraPose, size = 1024): Crop
   const fov = Math.max(30, Math.min(110, ((half * 180) / Math.PI) * 2 * 1.6));
   const f = size / 2 / Math.tan(((fov / 2) * Math.PI) / 180);
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-  for (const p of corners(o)) {
+  for (const p of box) {
     const v = sub(p, capture.position);
     const z = Math.max(0.05, dot(v, cam.forward));
     const x = size / 2 + (f * dot(v, cam.right)) / z, y = size / 2 - (f * dot(v, cam.up)) / z;
@@ -144,20 +151,22 @@ export function decodeRgb(file: string, size: number): Promise<Uint8Array> {
   });
 }
 
-/**
- * The box of what was actually painted: where the painted crop differs from the empty one, inside
- * the area the edit could touch. SAM 3D segments only what its box covers, and the painted object
- * does not keep to the blockout's box (measured: a sofa's back and arms rose above it, and SAM 3D
- * returned just the seat cushions). Shadows - a uniform darkening - do not count: with them the
- * box reached the floor under a table and SAM 3D made a slab of it. Falls back to the blockout box
- * when little changed.
- */
 /** A pixel the painting changed into the object: a strong colour difference that is not just a shadow (which darkens every channel alike). */
 function paintedPixel(before: Uint8Array, after: Uint8Array, i: number): boolean {
   const d = Math.max(Math.abs(after[i]! - before[i]!), Math.abs(after[i + 1]! - before[i + 1]!), Math.abs(after[i + 2]! - before[i + 2]!));
   if (d <= 48) return false;
   const r = [0, 1, 2].map((c) => (after[i + c]! + 4) / (before[i + c]! + 4));
   return !(Math.max(...r) < 0.92 && Math.max(...r) - Math.min(...r) < 0.12);
+}
+
+/** The pixels the edit could have touched: the box widened by 15% + 8 px (`below` times that downwards), clamped to the image. */
+function editArea(box: [number, number, number, number], size: number, below: number) {
+  const [x0, y0, x1, y1] = box;
+  const mx = (x1 - x0) * 0.15 + 8, my = (y1 - y0) * 0.15 + 8;
+  return {
+    ax0: Math.max(0, Math.floor(x0 - mx)), ax1: Math.min(size - 1, Math.ceil(x1 + mx)),
+    ay0: Math.max(0, Math.floor(y0 - my)), ay1: Math.min(size - 1, Math.ceil(y1 + my * below)),
+  };
 }
 
 /**
@@ -167,9 +176,7 @@ function paintedPixel(before: Uint8Array, after: Uint8Array, i: number): boolean
  */
 export function paintedMask(before: Uint8Array, after: Uint8Array, size: number, box: [number, number, number, number], grid = 128): Uint8Array | null {
   const [x0, y0, x1, y1] = box;
-  const mx = (x1 - x0) * 0.15 + 8, my = (y1 - y0) * 0.15 + 8;
-  const ax0 = Math.max(0, Math.floor(x0 - mx)), ax1 = Math.min(size - 1, Math.ceil(x1 + mx));
-  const ay0 = Math.max(0, Math.floor(y0 - my)), ay1 = Math.min(size - 1, Math.ceil(y1 + my));
+  const { ax0, ax1, ay0, ay1 } = editArea(box, size, 1);
   const hit = new Float32Array(grid * grid), all = new Float32Array(grid * grid);
   let n = 0;
   for (let y = ay0; y <= ay1; y++) for (let x = ax0; x <= ax1; x++) {
@@ -183,12 +190,17 @@ export function paintedMask(before: Uint8Array, after: Uint8Array, size: number,
   return m;
 }
 
+/**
+ * The box of what was actually painted: where the painted crop differs from the empty one, inside
+ * the area the edit could touch. SAM 3D segments only what its box covers, and the painted object
+ * does not keep to the blockout's box (measured: a sofa's back and arms rose above it, and SAM 3D
+ * returned just the seat cushions). Shadows - a uniform darkening - do not count: with them the
+ * box reached the floor under a table and SAM 3D made a slab of it. Falls back to the blockout box
+ * when little changed.
+ */
 export function paintedBox(before: Uint8Array, after: Uint8Array, size: number, box: [number, number, number, number]): { box: [number, number, number, number]; fromPaint: boolean } {
   const [x0, y0, x1, y1] = box;
-  const mx = (x1 - x0) * 0.15 + 8, my = (y1 - y0) * 0.15 + 8;
-  const ax0 = Math.max(0, Math.floor(x0 - mx)), ax1 = Math.min(size - 1, Math.ceil(x1 + mx));
-  const ay0 = Math.max(0, Math.floor(y0 - my)), ay1 = Math.min(size - 1, Math.ceil(y1 + my * 2));
-  // Changed pixels: a strong colour difference (contact shadows are mostly weaker).
+  const { ax0, ax1, ay0, ay1 } = editArea(box, size, 2);
   const rows = new Uint32Array(size), cols = new Uint32Array(size);
   let n = 0;
   for (let y = ay0; y <= ay1; y++) for (let x = ax0; x <= ax1; x++) {
@@ -210,10 +222,13 @@ export function paintedBox(before: Uint8Array, after: Uint8Array, size: number, 
 
 export interface Sam3dResult { ply: Uint8Array; seconds: number; requestId: string }
 
+/** What generateObjects needs of SAM 3D (sam3d with the key and options bound). */
+export type Sam3dFn = (image: Uint8Array, box: [number, number, number, number]) => Promise<{ ply: Uint8Array; seconds: number }>;
+
 const SAM3D_URL = 'https://queue.fal.run/fal-ai/sam-3/3d-objects';
 
-/** SAM 3D Objects on fal: a crop and a box in, a Gaussian-splat PLY out (1-4 minutes; queued). */
 /**
+ * SAM 3D Objects on fal: a crop and a box in, a Gaussian-splat PLY out (1-4 minutes; queued).
  * `maxQueueSeconds`: how long a request may wait in fal's queue before it is cancelled (default
  * 150); once it runs it gets `maxSeconds` in all (default 300) - cancelling a running request throws
  * its work away (seen: one cancelled at 150 s while running).
@@ -271,11 +286,6 @@ export async function sam3d(image: Uint8Array, box: [number, number, number, num
   return { ply, seconds: (Date.now() - t0) / 1000, requestId: String(sub.request_id) };
 }
 
-export async function saveJson(path: string, v: unknown): Promise<void> {
-  await writeFile(path, JSON.stringify(v, null, 2));
-}
-
-
 /**
  * Which objects become SAM 3D assets - the ones in the open room (keyObjects) and what stands on them - and so are left
  * out of the environment's blockout altogether: the environment's panorama is painted without
@@ -317,28 +327,24 @@ export interface ObjectAsset {
   gaussians: number | null;
   seconds: number | null;
   error: string | null;
-  /** Older scenes: moved to the environment's scale once. Placement now starts from `-sam.spz` every compose. */
+  /** Legacy, kept so older result.json files parse: composing deletes it (placement starts from `-sam.spz` every time). */
   shifted?: boolean;
-  /** How it was seated (core/seat.ts): levelled by how much, moved how far, onto what. */
-  seat?: import('../core/seat.ts').SeatResult;
+  /** How it was seated (seatScene.placeScene): levelled by how much, moved how far, onto what. */
+  seat?: SeatResult;
   /** How it was placed (core/place.ts + seatScene.placeScene): cleaned, stood up, turned, sized, pushed. */
-  place?: import('../core/place.ts').PlaceResult & { pushed: number };
+  place?: PlaceResult & { pushed: number };
 }
 
-/** Every asset object: crop the object panorama at it, SAM 3D, thin, fit to the blockout, write objects/<id>.spz. */
+/** Every asset object: crop (and paint) the panorama at it, SAM 3D, thin, fit to the blockout, write objects/<id>.spz and objects/<id>-sam.spz. */
 export async function generateObjects(layout: Layout, assets: LayoutObject[], panoPath: string, dir: string, deps: {
-  sam3d: (image: Uint8Array, box: [number, number, number, number]) => Promise<{ ply: Uint8Array; seconds: number }>;
-  /** When the panorama does not show the objects (the environment's): paint each into its own crop, guided by `guidePano` (the full blockout's clay render). */
+  sam3d: Sam3dFn;
   /** Objects whose crop was painted before (retrying a failed SAM 3D): their crop and box, no painting. */
   reuse?: Map<string, { crop: string; box: [number, number, number, number] }>;
+  /** When the panorama does not show the objects (the environment's): paint each into its own crop, guided by `guidePano` (the full blockout's clay render). */
   paint?: { guidePano: string; style?: string; run: (input: { image: Uint8Array; guide: Uint8Array; size: number; box: [number, number, number, number]; label: string; style?: string }) => Promise<Uint8Array> };
   maxGaussians?: number;
   onProgress?: (message: string) => void;
 }): Promise<ObjectAsset[]> {
-  const { mkdir, readFile, writeFile: wf } = await import('node:fs/promises');
-  const { join } = await import('node:path');
-  const { readPlyGaussians, thinGaussians, writeSpzGaussians } = await import('../core/gaussians.ts');
-  const { fitToBlockout } = await import('../core/fit.ts');
   const capture = layout.capture!;
   await mkdir(join(dir, 'objects'), { recursive: true });
   let done = 0;
@@ -354,7 +360,7 @@ export async function generateObjects(layout: Layout, assets: LayoutObject[], pa
         const envCrop = join(dir, `objects/${o.id}-env.jpg`), guideCrop = join(dir, `objects/${o.id}-guide.jpg`);
         await Promise.all([cropPanorama(panoPath, view, capture.yaw, envCrop), cropPanorama(deps.paint.guidePano, view, capture.yaw, guideCrop)]);
         const painted = await deps.paint.run({ image: new Uint8Array(await readFile(envCrop)), guide: new Uint8Array(await readFile(guideCrop)), size: view.size, box: view.box, label: o.label, style: deps.paint.style });
-        await wf(join(dir, crop), painted);
+        await writeFile(join(dir, crop), painted);
         // Prompt SAM 3D with the box of what was painted, not the blockout's (see paintedBox).
         const [before, after] = await Promise.all([decodeRgb(envCrop, view.size), decodeRgb(join(dir, crop), view.size)]);
         base = { ...base, box: paintedBox(before, after, view.size, view.box).box };
@@ -369,8 +375,8 @@ export async function generateObjects(layout: Layout, assets: LayoutObject[], pa
       // The rough fit is also kept as the source the scene's placement starts from every time it is
       // composed (seatScene.placeScene): `file` is what that placement writes.
       const bytes = writeSpzGaussians(g);
-      await wf(join(dir, file), bytes);
-      await wf(join(dir, `objects/${o.id}-sam.spz`), bytes);
+      await writeFile(join(dir, file), bytes);
+      await writeFile(join(dir, `objects/${o.id}-sam.spz`), bytes);
       deps.onProgress?.(`${++done}/${assets.length} objects: ${o.label} (${r.seconds.toFixed(0)} s)`);
       return { ...base, file, scale: fit.scale, spread: fit.spread, gaussians: g.count, seconds: r.seconds, error: null };
     } catch (e) {

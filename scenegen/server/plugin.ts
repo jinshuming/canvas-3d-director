@@ -6,18 +6,25 @@
  * director's library through `POST /api/library/import-scene`.
  *
  *   GET  /scenegen/api/config
- *   GET  /scenegen/api/projects                  list
- *   POST /scenegen/api/projects                  {kind, title?, layout?}
- *   GET  /scenegen/api/projects/:id              project (+ result, job)
- *   PUT  /scenegen/api/projects/:id              {title?, layout?, chat?}
- *   POST /scenegen/api/projects/:id/conditions   render the blockout from its capture point
- *   POST /scenegen/api/projects/:id/capture      search the capture point (ranked)
- *   POST /scenegen/api/projects/:id/generate     text → scene job {provider?}
- *   PUT  /scenegen/api/projects/:id/video        raw upload (Content-Type video/*)
- *   POST /scenegen/api/projects/:id/video-run    video → poses → scene job
- *   POST /scenegen/api/projects/:id/export       into the director's library
- *   POST /scenegen/api/agent/respond             one streamed model turn (OpenAI Responses)
- *   GET  /scenegen/files/:id/:path               project files
+ *   GET  /scenegen/api/examples                     finished scenes to show on a new canvas
+ *   GET  /scenegen/api/projects                     list
+ *   POST /scenegen/api/projects                     {kind, title?, layout?}
+ *   GET  /scenegen/api/projects/:id                 project (+ result, job)
+ *   PUT  /scenegen/api/projects/:id                 {title?, layout?, chat?, lighting?}
+ *   POST /scenegen/api/projects/:id/conditions      render the blockout from its capture point
+ *   POST /scenegen/api/projects/:id/capture         search the capture point (ranked)
+ *   POST /scenegen/api/projects/:id/quick-layout    text / picture / keyframes → blockout {text, useVideo?, useReference?}
+ *   PUT  /scenegen/api/projects/:id/layout-video    raw upload: keyframes for the blockout, middle one as reference
+ *   PUT  /scenegen/api/projects/:id/reference       raw upload: the picture the scene is made from
+ *   POST /scenegen/api/projects/:id/generate        text → scene job {provider?, maxFills?, useReference?, objects?}
+ *   POST /scenegen/api/projects/:id/expand          job: generate the view at a camera, rebuild {position, yaw, pitch, fov?}
+ *   POST /scenegen/api/projects/:id/retry-objects   job: SAM 3D again for the failed objects
+ *   PUT  /scenegen/api/projects/:id/video           raw upload (Content-Type video/*)
+ *   POST /scenegen/api/projects/:id/video-run       video → poses → scene job {mode?, square?, reusePoses?, maxViews?}
+ *   POST /scenegen/api/projects/:id/cancel          abort the running job
+ *   POST /scenegen/api/projects/:id/export          into the director's library
+ *   POST /scenegen/api/agent/respond                one streamed model turn (OpenAI Responses)
+ *   GET  /scenegen/files/:id/:path                  project files
  */
 import { randomUUID } from 'node:crypto';
 import { createWriteStream, existsSync } from 'node:fs';
@@ -47,9 +54,9 @@ import { buildLayout, requestSpec } from './quickLayout.ts';
 import type { PanoProvider } from './pano.ts';
 import { expandScene } from './expand.ts';
 import { renderConditions, retryObjects, textToScene } from './textScene.ts';
+import type { PastJob } from './textScene.ts';
 import { extractKeyframes, readKeyframe } from './keyframes.ts';
 import { videoPipelineAvailable, videoToScene } from './videoScene.ts';
-
 
 /**
  * What the director's library takes for a finished scene (POST /api/library/import-scene).
@@ -231,6 +238,8 @@ export function scenegenServer(opts: ScenegenOptions): Plugin {
     }).finally(() => { jobs.delete(p.id); p.job = job; void save(p); });
     return job;
   }
+  /** The project's last job, kept on the result of the job that replaces it (expand, retry). */
+  const pastJobOf = (proj: Project): PastJob | null => (proj.job ? { kind: proj.job.kind, log: proj.job.log, startedAt: proj.job.startedAt, endedAt: proj.job.endedAt, status: proj.job.status } : null);
   const note = (job: Job, stage: string, message: string, progress?: number) => {
     job.stage = stage; job.message = message; if (progress !== undefined) job.progress = progress;
     job.log.push(`[${((Date.now() - job.startedAt) / 1000).toFixed(0)}s] ${stage}: ${message}`);
@@ -324,10 +333,7 @@ export function scenegenServer(opts: ScenegenOptions): Plugin {
       await save(proj);
       return json(res, { ok: true, updatedAt: proj.updatedAt });
     }
-    if (action === '/capture' && m === 'POST') {
-      const c = findCapturePoint(proj.layout);
-      return json(res, c);
-    }
+    if (action === '/capture' && m === 'POST') return json(res, findCapturePoint(proj.layout));
     if (action === '/conditions' && m === 'POST') {
       const dir = join(pdir(proj.id), 'preview');
       const c = await renderConditions(proj.layout, dir);
@@ -433,19 +439,19 @@ export function scenegenServer(opts: ScenegenOptions): Plugin {
       const pos = body.position;
       if (!Array.isArray(pos) || pos.length !== 3 || !pos.every((v: unknown) => typeof v === 'number' && Number.isFinite(v))) throw new HttpError(400, 'position must be [x, y, z] in metres.');
       if (!proj.result || proj.job?.status === 'running') throw new HttpError(409, 'Expand a scene once it is generated.');
-      const prev = proj.job ? { kind: proj.job.kind, log: proj.job.log, startedAt: proj.job.startedAt, endedAt: proj.job.endedAt, status: proj.job.status } : null;
-      const job = startJob(proj, proj.kind === 'video' ? 'video' : 'text', (j, signal) => expandScene(join(pdir(proj.id), 'out'), proj.kind === 'video' ? 'video' : 'text',
+      const previousJob = pastJobOf(proj);
+      const job = startJob(proj, proj.kind, (j, signal) => expandScene(join(pdir(proj.id), 'out'), proj.kind,
         { position: pos as [number, number, number], yaw: Number(body.yaw) || 0, pitch: Number(body.pitch) || 0 },
-        { jst2, fov: body.fov ? Number(body.fov) : undefined, previousJob: prev, signal, onProgress: (stage, message) => note(j, stage, message, { expand: 0.2, rebuild: 0.6, compose: 0.9, done: 1 }[stage] ?? 0.5) }));
+        { jst2, fov: body.fov ? Number(body.fov) : undefined, previousJob, signal, onProgress: (stage, message) => note(j, stage, message, { expand: 0.2, rebuild: 0.6, compose: 0.9, done: 1 }[stage] ?? 0.5) }));
       return json(res, job, 202);
     }
     if (action === '/retry-objects' && m === 'POST') {
       // SAM 3D again for the objects that failed, from their painted crops; the scene is recomposed.
       if (!opts.falKey) throw new HttpError(503, 'FAL_KEY is not set: SAM 3D cannot run.');
       if (!(proj.result as { objects?: Array<{ file: string | null }> } | null)?.objects?.some((o) => !o.file)) throw new HttpError(400, 'No failed objects to retry.');
-      const prev = proj.job ? { kind: proj.job.kind, log: proj.job.log, startedAt: proj.job.startedAt, endedAt: proj.job.endedAt, status: proj.job.status } : null;
+      const previousJob = pastJobOf(proj);
       const job = startJob(proj, 'text', (j) => retryObjects(join(pdir(proj.id), 'out'), {
-        previousJob: prev,
+        previousJob,
         sam3d: (image: Uint8Array, box: [number, number, number, number]) => sam3d(image, box, opts.falKey),
         onProgress: (stage, message) => note(j, stage, message, stage === 'done' ? 1 : 0.5),
       }));
@@ -495,6 +501,7 @@ export function scenegenServer(opts: ScenegenOptions): Plugin {
     return false;
   }
 
+  // Job progress (0-1) per stage: the generate route after the poses, and the pose pipeline.
   const GEN_PROGRESS: Record<string, number> = { stitch: 0.56, complete: 0.6, scale: 0.66, retry: 0.7, scene: 0.74, path: 0.82, rebuild: 0.9, fill: 0.95, done: 1 };
   function stageProgress(stage: string, p: number): number {
     const span: Record<string, [number, number]> = { probe: [0, 0.02], sample: [0.02, 0.1], colmap: [0.1, 0.75], normalise: [0.75, 0.8], select: [0.8, 0.82], write: [0.82, 0.85], upload: [0.85, 0.9], scene: [0.9, 0.99], done: [1, 1] };
@@ -502,15 +509,14 @@ export function scenegenServer(opts: ScenegenOptions): Plugin {
     return a + (b - a) * Math.max(0, Math.min(1, p));
   }
 
-
   return {
     name: 'scenegen-server',
     configureServer(server) {
       server.httpServer?.once('listening', () => {
         const a = server.httpServer?.address();
         if (a && typeof a === 'object') {
-          // Loopback and wildcard binds go by name: NO_PROXY lists "localhost", not "[::1]", and the
-          // dev server runs with HTTPS_PROXY set (see .claude/launch.json).
+          // Loopback and wildcard binds go by name: NO_PROXY usually lists "localhost", not "[::1]",
+          // and the dev server may run with HTTPS_PROXY set (when OpenAI needs a proxy).
           const loop = ['::', '0.0.0.0', '::1', '127.0.0.1'].includes(a.address);
           const host = loop ? 'localhost' : a.family === 'IPv6' ? `[${a.address}]` : a.address;
           origin = `http://${host}:${a.port}`;

@@ -417,8 +417,7 @@ export function directorServer(opts: DirectorServerOptions): Plugin {
     // The agent: one model turn, streamed. The page runs the tools (they need the renderer) and
     // sends their results back as the next turn's input, chained by previous_response_id.
     if (p === '/api/agent/respond' && m === 'POST') {
-      const ai = opts.openai;
-      return relayResponses(req, res, ai && { apiKey: ai.apiKey, base: ai.base, model: ai.model, instructions: AGENT_INSTRUCTIONS }, await readJson(req) as TurnBody);
+      return relayResponses(req, res, opts.openai && { ...opts.openai, instructions: AGENT_INSTRUCTIONS }, await readJson(req) as TurnBody);
     }
 
     if (p === '/api/worlds' && m === 'GET') return json(res, await listWorlds());
@@ -512,7 +511,7 @@ export function directorServer(opts: DirectorServerOptions): Plugin {
     // A scene from the scene generator (scenegen/): its files are copied in, and a generated
     // scene keeps its Viggle session so 扩展场景 can still fill it.
     if (p === '/api/library/import-scene' && m === 'POST') {
-      const b = await readJson(req) as { name?: string; dir?: string; spz?: string; objects?: string | null; panorama?: string | null; layout?: string | null; viggle?: { sessionId: string; batchIds: string[] } | null; lighting?: Partial<StageLighting> | null; relight?: StageSceneRelight | null; source?: unknown };
+      const b = await readJson(req) as { name?: string; dir?: string; spz?: string; objects?: string | null; panorama?: string | null; layout?: string | null; viggle?: { sessionId: string; batchIds: string[] } | null; lighting?: Partial<StageLighting> | null; relight?: unknown };
       const allowed = join(opts.dataDir, 'scenegen') + sep;
       const src = (f: string | null | undefined) => {
         if (!f || !b.dir) return null;
@@ -524,20 +523,18 @@ export function directorServer(opts: DirectorServerOptions): Plugin {
       if (!spz) throw httpError(400, 'spz is required.');
       const id = `scene_${randomUUID().slice(0, 12)}`;
       await mkdir(filesDir, { recursive: true });
-      await copyFile(spz, join(filesDir, `${id}.spz`));
+      const copyIn = async (from: string, name: string) => { await copyFile(from, join(filesDir, name)); return `/files/${name}`; };
+      const url = await copyIn(spz, `${id}.spz`);
       const pano = src(b.panorama);
-      let panoramaUrl: string | null = null;
-      if (pano) { const ext = pano.endsWith('.png') ? '.png' : '.jpg'; await copyFile(pano, join(filesDir, `${id}-pano${ext}`)); panoramaUrl = `/files/${id}-pano${ext}`; }
+      const panoramaUrl = pano ? await copyIn(pano, `${id}-pano${pano.endsWith('.png') ? '.png' : '.jpg'}`) : null;
       const layout = src(b.layout);
-      let layoutUrl: string | undefined;
-      if (layout) { await copyFile(layout, join(filesDir, `${id}-layout.json`)); layoutUrl = `/files/${id}-layout.json`; }
+      const layoutUrl = layout && await copyIn(layout, `${id}-layout.json`);
       // Its objects, a second splat in the same frame as the scene file.
       const objects = src(b.objects);
-      let objectsUrl: string | undefined;
-      if (objects) { await copyFile(objects, join(filesDir, `${id}-objects.spz`)); objectsUrl = `/files/${id}-objects.spz`; }
+      const objectsUrl = objects && await copyIn(objects, `${id}-objects.spz`);
       const relight = sceneRelight(b.relight);
       const scene: LibraryScene = {
-        id, name: String(b.name ?? 'Generated scene').slice(0, 60), url: `/files/${id}.spz`, panoramaUrl,
+        id, name: String(b.name ?? 'Generated scene').slice(0, 60), url, panoramaUrl,
         viggle: b.viggle && Array.isArray(b.viggle.batchIds) ? { sessionId: String(b.viggle.sessionId), batchIds: b.viggle.batchIds.map(String) } : null,
         ...(layoutUrl ? { layoutUrl } : {}),
         ...(objectsUrl ? { objectsUrl } : {}),

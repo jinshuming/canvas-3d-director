@@ -36,7 +36,7 @@ const WALLS = ['north', 'south', 'east', 'west'];
 const num = { type: 'number' };
 const str = { type: 'string' };
 
-export const LAYOUT_SCHEMA = {
+const LAYOUT_SCHEMA = {
   type: 'object', additionalProperties: false,
   required: ['title', 'outdoor', 'room', 'ground_size', 'openings', 'objects', 'style'],
   properties: {
@@ -54,7 +54,7 @@ export const LAYOUT_SCHEMA = {
   },
 } as const;
 
-export const QUICK_INSTRUCTIONS = `You turn a description (text, and maybe pictures or video frames of a place) into a 3D blockout layout, in ONE answer.
+const QUICK_INSTRUCTIONS = `You turn a description (text, and maybe pictures or video frames of a place) into a 3D blockout layout, in ONE answer.
 
 World: metres, floor y = 0, +X east, -Z north, +Z south. A room is centred on the origin: x from -width/2 to +width/2, z from -depth/2 (north wall) to +depth/2 (south wall).
 - Interior: outdoor = false and a room of plausible size (living room 5-7 × 4-6 m, 2.7-3 m high; bedroom 4 × 4; café 8 × 6). Outdoors: outdoor = true, ground_size 30-60, and room is ignored (give 1, 1, 1).
@@ -69,10 +69,10 @@ World: metres, floor y = 0, +X east, -Z north, +Z south. A room is centred on th
 Catalog types (type (default w×h×d m; aliases)) - use the closest, or "box" with a good label:
 ${catalogSummary()}`;
 
-export interface QuickLayoutResult { layout: Layout; keys: string[]; seconds: number; model: string; issuesFixed: number }
-
-/** Ask the model for the spec (Responses API, strict JSON schema). */
-/** `images`: one picture, or a walkthrough video's frames; `picture`: a picture added beside the frames. */
+/**
+ * Ask the model for the spec (Responses API, strict JSON schema). `images`: one picture, or a
+ * walkthrough video's frames; `picture`: a picture added beside the frames.
+ */
 export async function requestSpec(input: { text: string; images: string[]; picture?: string }, ai: { apiKey?: string; base?: string; model: string }, f: typeof fetch = (...a) => globalThis.fetch(...a)): Promise<LayoutSpec> {
   if (!ai.apiKey) throw Object.assign(new Error('OPENAI_API_KEY is not set on the server.'), { status: 503 });
   const frames = input.images.length > 1 || (input.images.length === 1 && input.picture);

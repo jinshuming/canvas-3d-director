@@ -41,6 +41,15 @@ export interface StageSceneRelight {
   bounds: { min: Vec3Tuple; max: Vec3Tuple };
 }
 
+/** The stage's scene for a scene from the asset library, as it was made; its floor is measured when it loads. */
+export function sceneFromLibrary(s: Pick<StageScene, 'name' | 'url' | 'viggle' | 'panoramaUrl' | 'objectsUrl' | 'relight'>): StageScene {
+  return {
+    name: s.name, url: s.url, placement: null, viggle: s.viggle ?? null, panoramaUrl: s.panoramaUrl ?? null,
+    ...(s.objectsUrl ? { objectsUrl: s.objectsUrl } : {}),
+    ...(s.relight ? { relight: s.relight } : {}),
+  };
+}
+
 export interface StagePlacement {
   upright: boolean;
   /** Metres per file unit. */
@@ -184,9 +193,9 @@ export interface StageLighting {
   /** 0..1: how far the light replaces the characters' own look. */
   relight: number;
   /**
-   * No longer used: the scene always keeps its own light and only receives the characters' shadows. A
-   * light re-colours the scene only inside the box its shadow receiver is cut to (a few metres round the
-   * capture point), which shows as a coloured square with straight edges. Old worlds may still carry one.
+   * No longer used (dropped by normalizeLighting): a world-wide scene tint showed as a coloured square
+   * at the edge of the shadow receiver. A scene that may be re-coloured says so in StageScene.relight.
+   * Old worlds may still carry one.
    */
   sceneRelight?: number;
 }

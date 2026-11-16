@@ -14,9 +14,11 @@ import { sampleTrack, trackTravel } from './clips.js';
 import { sampleMoves } from './moves.js';
 import type { StageCharacter, StageDoc, StageLighting, StagePlacement, StageSceneRelight, StageShot, Vec3Tuple } from './types.js';
 
-/** What the viewport shows: the free editing camera, a shot's camera, or a fixed camera (an agent looking somewhere). */
-/** Metres from the capture point the scene is relit (and receives shadows) out to: as far as a panorama is reconstructed well. */
-const RELIGHT_REACH = 6;
+/**
+ * Where a scene with no relight box of its own receives shadows, in metres around the capture point
+ * (floor y = 0): 6 m out, as far as a panorama is reconstructed well.
+ */
+const SHADOW_BOX: StageSceneRelight['bounds'] = { min: [-6, -0.4, -6], max: [6, 4, 6] };
 
 /** What the viewport looks through: the free camera, the preview (the shot cut in at the playhead, else the picked shot), or a fixed camera. `edit` is the film alone and is no longer offered in the editor. */
 export type StageView = { kind: 'free' } | { kind: 'shot'; shotId: string } | { kind: 'edit' } | { kind: 'camera'; camera: CameraSample };
@@ -107,8 +109,6 @@ export class StageRenderer {
   private objectsTicket = 0;
   /** The placement the scene is mounted with, for the objects to follow. */
   private placement: StagePlacement | null = null;
-  /** How far the light may re-colour the scene and its objects, and where (StageScene.relight). */
-  private sceneRelight: StageSceneRelight | null = null;
 
   /** Overlay drawing: which character to ring, which shot's path to draw. */
   private selectedCharacter: string | null = null;
@@ -358,7 +358,6 @@ export class StageRenderer {
 
   private syncScene(doc: StageDoc): void {
     const url = doc.scene?.url ?? null;
-    this.sceneRelight = doc.scene?.relight ?? null;
     if (url === this.envUrl) {
       // Same file, placement edited by hand: re-mount it.
       if (this.env && doc.scene?.placement) {
@@ -425,19 +424,14 @@ export class StageRenderer {
   private mount(env: Environment, placement: StagePlacement): void {
     this.mountedKey = JSON.stringify(placement);
     this.placement = placement;
-    for (const e of [env, this.objects]) {
-      if (!e) continue;
-      const { position: p, rotation: r, scale: k } = placeWalkScene(placement);
-      e.entity.setPosition(p.x, p.y, p.z);
-      e.entity.setEulerAngles(r.x, r.y, r.z);
-      e.entity.setLocalScale(k, k, k);
-    }
+    place(env, placement);
+    if (this.objects) place(this.objects, placement);
   }
 
   /**
-   * The scene's objects: loaded with the placement the scene has now and moved with it after (the scene
-   * measures its floor when it first loads). Shown, relit and shadowed like the scene; not in its
-   * collider, which is built from the scene file alone.
+   * The scene's objects: loaded with the scene's placement and moved with it after (the scene measures
+   * its floor when it first loads). Relit and shadowed like the scene, but not in its collider, which
+   * is built from the scene file alone. Runs after `syncScene`, so a scene has a placement by now.
    */
   private syncObjects(doc: StageDoc): void {
     const url = doc.scene?.objectsUrl ?? null;
@@ -446,14 +440,15 @@ export class StageRenderer {
     const ticket = ++this.objectsTicket;
     this.objects?.destroy();
     this.objects = null;
-    if (!url || !doc.scene) return;
+    if (!url || !this.placement) return;
     const filename = filenameOf(url);
-    const t = placeWalkScene(this.placement ?? doc.scene.placement ?? { upright: isUprightFile(filename), scale: 1, floor: 0, start: [0, 0] });
+    const t = placeWalkScene(this.placement);
     Environment.load(this.scene, url, { rotation: t.rotation, position: t.position, scale: t.scale, filename })
       .then((objects) => {
         if (ticket !== this.objectsTicket || this.destroyed) { objects.destroy(); return; }
         this.objects = objects;
-        if (this.env && this.placement) this.mount(this.env, this.placement);
+        // The scene may have been re-mounted while these loaded.
+        if (this.placement) place(objects, this.placement);
         this.attachRelightTargets();
         this.emitState();
       })
@@ -505,34 +500,28 @@ export class StageRenderer {
     const l = this.lighting;
     if (!r || !l) return;
     const env = this.env;
-    const own = this.sceneRelight;
-    if (env && !this.relit.has(env) && own) {
-      // A scene that declares its room (the scene generator's): the light may re-colour it as far as
-      // it says, inside that room - the box's edges are its walls, so no coloured square shows.
+    // How far the light may re-colour the scene and its objects (StageScene.relight); none: not at all.
+    const own = this.doc?.scene?.relight ?? null;
+    const strength = own?.strength ?? 0;
+    if (env && !this.relit.has(env)) {
       this.relit.add(env);
-      const { min, max } = own.bounds;
+      // A scene that declares its room (the scene generator's) is relit inside it: the box's edges are
+      // its walls, so no coloured square shows. Any other scene's baked light is real: it is never
+      // re-coloured (strength 0), only shadowed - a tint would fill the box and stop at its edge, a
+      // coloured square on the ground. Its proxy is then only the receiver for the characters' shadows,
+      // so it is cropped to where they can stand: a capture's splats reach far past that (sky,
+      // mountains, floaters), the voxel grid is one dense box over everything it is given, and an
+      // uncropped panorama came out at 1-2 m a voxel - too coarse to put a shadow at anyone's feet.
+      const { min, max } = own?.bounds ?? SHADOW_BOX;
       r.add(env, { bounds: { min: { x: min[0], y: min[1], z: min[2] }, max: { x: max[0], y: max[1], z: max[2] } } })
-        .then(() => { if (this.env === env) r.setParams(env, { strength: own.strength }); })
+        .then(() => { if (this.env === env) r.setParams(env, { strength }); })
         .catch((e: unknown) => { this.errors.push(`光影（场景）：${message(e)}`); this.emitState(); });
     }
     const objects = this.objects;
     if (objects && !this.relit.has(objects)) {
       this.relit.add(objects);
-      const strength = own?.strength ?? 0;
       r.add(objects).then(() => { if (this.objects === objects) r.setParams(objects, { strength }); })
         .catch((e: unknown) => { this.errors.push(`光影（物体）：${message(e)}`); this.emitState(); });
-    }
-    if (env && !this.relit.has(env)) {
-      this.relit.add(env);
-      // The scene's baked light is real: it is never re-coloured (strength 0), only shadowed. A tint would
-      // fill the box below and stop at its edge, a coloured square on the ground.
-      // Its proxy is only the receiver for the characters' shadows, so it is cropped to where they can
-      // stand: a capture's splats reach far past that (sky, mountains, floaters), the voxel grid is one
-      // dense box over everything it is given, and an uncropped panorama came out at 1-2 m a voxel -
-      // a floor too coarse to put a shadow at anyone's feet. Metres, floor at y = 0.
-      r.add(env, { bounds: { min: { x: -RELIGHT_REACH, y: -0.4, z: -RELIGHT_REACH }, max: { x: RELIGHT_REACH, y: 4, z: RELIGHT_REACH } } })
-        .then(() => { if (this.env === env) r.setParams(env, { strength: 0 }); })
-        .catch((e: unknown) => { this.errors.push(`光影（场景）：${message(e)}`); this.emitState(); });
     }
     for (const live of this.characters.values()) {
       const c = live.character;
@@ -1092,6 +1081,14 @@ function colors(n: number, rgba: number[]): number[] {
   const out = new Array<number>(n * 4);
   for (let i = 0; i < out.length; i++) out[i] = rgba[i % 4]!;
   return out;
+}
+
+/** Mount a scene file (or its objects) in metres, floor at y = 0 (see `placeWalkScene`). */
+function place(e: Environment, placement: StagePlacement): void {
+  const { position: p, rotation: r, scale: k } = placeWalkScene(placement);
+  e.entity.setPosition(p.x, p.y, p.z);
+  e.entity.setEulerAngles(r.x, r.y, r.z);
+  e.entity.setLocalScale(k, k, k);
 }
 
 function filenameOf(url: string): string {
