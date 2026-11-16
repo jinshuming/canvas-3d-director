@@ -13,9 +13,9 @@ import type { CanvasNode, CanvasState, NodeKind } from './model.ts';
 import { loadCanvas, newId, NODE_LABEL, NODE_SIZE, saveCanvas } from './model.ts';
 
 /**
- * A demo canvas: the board, its nodes and the
- * Agent panel look the part, and one node is real - World, which opens the
- * 3D Studio on its own stage.
+ * The canvas: the board and its nodes. The real ones are 导演台 (Cinema Studio, which opens
+ * the 3D Studio on its own stage) and the scene nodes (场景生成 / 场景重建, which open the
+ * full-screen scene editor).
  */
 export function CanvasPage() {
   const [state, setState] = useState<CanvasState>(() => loadCanvas(seed));
@@ -65,15 +65,27 @@ export function CanvasPage() {
   const setView = (v: Partial<CanvasState['view']>) => setState((s) => ({ ...s, view: { ...s.view, ...v } }));
 
   // ── Pan, zoom, drag ──────────────────────────────────────────────────────
+  const pan = (e: React.PointerEvent) => {
+    const x0 = e.clientX, y0 = e.clientY, vx = view.x, vy = view.y;
+    const move = (ev: PointerEvent) => setView({ x: vx + ev.clientX - x0, y: vy + ev.clientY - y0 });
+    const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); document.body.classList.remove('cv-panning'); };
+    addEventListener('pointermove', move);
+    addEventListener('pointerup', up);
+  };
+  // The middle button pans from anywhere on the board - over nodes too - as in most canvas tools;
+  // captured before the nodes see it, and without the browser's autoscroll.
+  const onBoardPointerDownCapture = (e: React.PointerEvent) => {
+    if (e.button !== 1 || (e.target as HTMLElement).closest('.cv-float')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    document.body.classList.add('cv-panning');
+    pan(e);
+  };
   const onBoardPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0 || (e.target as HTMLElement).closest('.cv-node, .cv-float')) return;
     setSelected(null);
     setMenu(false);
-    const x0 = e.clientX, y0 = e.clientY, vx = view.x, vy = view.y;
-    const move = (ev: PointerEvent) => setView({ x: vx + ev.clientX - x0, y: vy + ev.clientY - y0 });
-    const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); };
-    addEventListener('pointermove', move);
-    addEventListener('pointerup', up);
+    pan(e);
   };
 
   const zoomAt = useCallback((zoom: number, cx: number, cy: number) => {
@@ -142,7 +154,7 @@ export function CanvasPage() {
     }
     if (kind === 'world' && !node.worldId) {
       // Every World node is its own project file.
-      const w = await api.createWorld({ title: `World ${state.nodes.filter((n) => n.kind === 'world').length + 1}` });
+      const w = await api.createWorld({ title: `导演台 ${state.nodes.filter((n) => n.kind === 'world').length + 1}` });
       node.worldId = w.id;
       node.title = w.title;
       setWorlds((m) => new Map(m ?? []).set(w.id, { id: w.id, title: w.title, createdAt: w.createdAt, updatedAt: w.updatedAt, coverUrl: null, sceneName: null, characters: 0, shots: 0, prompts: 0, lastPrompt: null, origin: w.origin }));
@@ -187,7 +199,8 @@ export function CanvasPage() {
 
   return (
     <div className="cv-root" style={{ '--cv-ui': ui } as React.CSSProperties}>
-      <section className="cv-board" ref={board} onPointerDown={onBoardPointerDown}
+      <section className="cv-board" ref={board} onPointerDown={onBoardPointerDown} onPointerDownCapture={onBoardPointerDownCapture}
+        onMouseDown={(e) => { if (e.button === 1) e.preventDefault(); }} onAuxClick={(e) => { if (e.button === 1) e.preventDefault(); }}
         style={{ backgroundPosition: `${view.x}px ${view.y}px`, backgroundSize: `${22 * scale}px ${22 * scale}px` }}>
         <div className="cv-world" style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${scale})` }}>
           <svg className="cv-edges" width="1" height="1">
@@ -243,7 +256,7 @@ export function CanvasPage() {
             <MenuRow icon="video" title="Video" onClick={() => void add('video')} />
             <MenuRow icon="audio" title="Audio" dot onClick={() => setMenu(false)} />
             <MenuRow icon="box" title="3D" dot onClick={() => void add('3d')} />
-            <MenuRow icon="globe" title="World" badge="New" dot onClick={() => void add('world')} />
+            <MenuRow icon="globe" title="导演台" sub="Cinema Studio" badge="New" dot onClick={() => void add('world')} />
             <MenuRow icon="scene" title="场景生成" sub="文本 / 图片 / 视频 → 3D 场景" badge="New" onClick={() => void add('scenegen')} />
             <MenuRow icon="camera" title="场景重建" sub="视频 → 3D 场景" badge="New" onClick={() => void add('scenerecon')} />
             <div className="cv-menu-head">Utilities</div>
@@ -267,8 +280,6 @@ export function CanvasPage() {
           <button className="cv-pill cv-round cv-help" title="Help"><Icon name="help" size={22} /></button>
         </div>
       </section>
-
-      <ChatPanel />
     </div>
   );
 }
@@ -315,78 +326,14 @@ function WorldCard({ node, world }: { node: CanvasNode; world: WorldSummary | nu
       {world?.coverUrl ? <img src={world.coverUrl} alt="" draggable={false} /> : <div className="cv-world-empty"><Icon name="globe" size={30} /></div>}
       <div className="cv-world-shade" />
       <div className="cv-world-info">
-        <strong>{world === null ? 'World 已删除' : world?.title ?? node.title ?? 'World'}</strong>
+        <strong>{world === null ? '导演台已删除' : world?.title ?? node.title ?? '导演台'}</strong>
         {world && (empty
-          ? <small>新的 World · 进入后告诉 Agent 你想拍什么</small>
+          ? <small>新的导演台 · 进入后告诉 Agent 你想拍什么</small>
           : <small>{world.sceneName ?? '还没有场景'} · {world.characters} 个角色 · {world.shots} 个镜头</small>)}
         {world?.lastPrompt && <small className="cv-world-prompt">“{world.lastPrompt}”</small>}
       </div>
-      <button className="cv-enter" disabled={!world} onClick={enter}>{empty ? '开始搭建' : 'Enter World'} <Icon name="arrowRight" size={14} /></button>
+      <button className="cv-enter" disabled={!world} onClick={enter}>{empty ? '开始搭建' : '进入导演台'} <Icon name="arrowRight" size={14} /></button>
     </div>
-  );
-}
-
-function ChatPanel() {
-  const [text, setText] = useState('');
-  const [messages, setMessages] = useState<Array<{ who: 'me' | 'agent'; text: string }>>([]);
-  const [tip, setTip] = useState(true);
-  const send = () => {
-    const t = text.trim();
-    if (!t) return;
-    setMessages((m) => [...m, { who: 'me', text: t }, { who: 'agent', text: '（演示画布）Agent 对话还没有接入。用左侧 ＋ → World 添加一个世界节点，点「Enter World」进入 3D 导演台。' }]);
-    setText('');
-  };
-  return (
-    <aside className="cv-chat">
-      <header className="cv-chat-head">
-        <Icon name="folder" size={22} />
-        <strong>New chat</strong><Icon name="chevronDown" size={14} className="cv-muted" />
-        <div className="cv-spacer" />
-        <button className="cv-ghost"><Icon name="edit" size={20} /></button>
-        <button className="cv-ghost"><Icon name="expand" size={20} /></button>
-        <button className="cv-ghost"><Icon name="more" size={20} /></button>
-      </header>
-      <div className="cv-chat-body">
-        {messages.length === 0 ? (
-          <div className="cv-hello">
-            <h2>Hi there!</h2>
-            <h1>What are we making today?</h1>
-            <div className="cv-suggest">
-              <button className="cv-card tilt-l" onClick={() => setText('Review this canvas and suggest the clearest next creative step.')}>
-                <Icon name="bulb" size={20} /><Icon name="arrowRight" size={16} className="cv-card-arrow" />
-                <strong>Find the next step</strong><span>Review this canvas and suggest the clearest next creative step.</span>
-              </button>
-              <button className="cv-card tilt-r" onClick={() => setText('Help me explore a few strong visual directions based on this project.')}>
-                <Icon name="sparkle" size={20} /><Icon name="arrowRight" size={16} className="cv-card-arrow" />
-                <strong>Explore visual ideas</strong><span>Help me explore a few strong visual directions based on this project.</span>
-              </button>
-            </div>
-            <div className="cv-refresh"><Icon name="swap" size={16} /></div>
-          </div>
-        ) : (
-          <div className="cv-messages">
-            {messages.map((m, i) => <div key={i} className={`cv-msg ${m.who}`}>{m.text}</div>)}
-          </div>
-        )}
-      </div>
-      {tip && messages.length === 0 && (
-        <div className="cv-tip"><span className="cv-tip-apps"><Icon name="globe" size={14} /></span>Use apps to extend Agent capabilities.<button className="cv-ghost sm" onClick={() => setTip(false)}><Icon name="x" size={14} /></button></div>
-      )}
-      <div className="cv-composer">
-        <textarea rows={2} value={text} onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
-          placeholder="Describe ideas, / use skills, add canvas content, @ add references or use Apps" />
-        <div className="cv-composer-row">
-          <button className="cv-pill cv-square sm"><Icon name="plus" size={18} /></button>
-          <button className="cv-ghost cv-mode"><Icon name="hand" size={18} />Manual<Icon name="chevronDown" size={14} /></button>
-          <div className="cv-spacer" />
-          <span className="cv-ring" />
-          <button className="cv-ghost cv-mode">Auto<Icon name="chevronDown" size={14} /></button>
-          <button className="cv-ghost"><Icon name="mic" size={20} /></button>
-          <button className={`cv-send ${text.trim() ? 'on' : ''}`} onClick={send}><Icon name="arrowUp" size={20} /></button>
-        </div>
-      </div>
-    </aside>
   );
 }
 
@@ -406,8 +353,8 @@ function seed(): CanvasState {
 
 /**
  * The canvas UI's scale: fixed proportions at any window size (its top
- * pills are about 5.6% of the window height, the Agent column about a quarter
- * of its width), so a small window shows the same layout, smaller. 1 at a
+ * pills are about 5.6% of the window height), so a small window shows the
+ * same layout, smaller. 1 at a
  * 1000 × 1600 window and up; never below 0.5, about where text stops being readable.
  */
 function useUiScale(): number {

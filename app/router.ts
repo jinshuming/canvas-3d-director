@@ -4,14 +4,17 @@ import { useEffect, useState } from 'react';
  * Path routes:
  *   /canvas               the canvas (a demo board)
  *   /canvas/world         every World project
- *   /canvas/world/<id>    the 3D Studio on one World; `?node=<id>` names the
+ *   /canvas/world/<id>    the 3D Studio (导演台) on one World; `?node=<id>` names the
  *                         canvas node it was entered from
+ *   /canvas/scene/<id>    the full-screen scene editor on one scene generator project
+ *                         (a 场景生成 / 场景重建 node's); `?node=<id>` likewise
  * Anything else lands on /canvas; the old `#/stage/<id>` links still open.
  */
 export type Route =
   | { page: 'canvas' }
   | { page: 'worlds' }
-  | { page: 'world'; id: string; node: string | null };
+  | { page: 'world'; id: string; node: string | null }
+  | { page: 'scene'; id: string; node: string | null };
 
 export function parse(path: string, hash = '', search = ''): Route | { redirect: string } {
   const legacy = /^#\/stage\/([A-Za-z0-9_-]+)/.exec(hash);
@@ -21,6 +24,8 @@ export function parse(path: string, hash = '', search = ''): Route | { redirect:
   if (p === '/canvas/world') return { page: 'worlds' };
   const m = /^\/canvas\/world\/([A-Za-z0-9_-]+)$/.exec(p);
   if (m) return { page: 'world', id: m[1]!, node: new URLSearchParams(search).get('node') };
+  const sc = /^\/canvas\/scene\/([A-Za-z0-9_-]+)$/.exec(p);
+  if (sc) return { page: 'scene', id: sc[1]!, node: new URLSearchParams(search).get('node') };
   return { redirect: '/canvas' };
 }
 
@@ -65,3 +70,6 @@ export function linkProps(to: string) {
 
 /** The editor's address for a world, remembering the canvas node it belongs to. */
 export const worldPath = (id: string, node?: string | null) => `/canvas/world/${id}${node ? `?node=${encodeURIComponent(node)}` : ''}`;
+
+/** The full-screen scene editor for a scene generator project, remembering the canvas node it belongs to. */
+export const scenePath = (id: string, node?: string | null) => `/canvas/scene/${id}${node ? `?node=${encodeURIComponent(node)}` : ''}`;

@@ -12,7 +12,7 @@ import type { CameraPose } from '../core/frame.ts';
 import { classColor, objectSolids } from '../core/geometry.ts';
 import type { Layout } from '../core/types.ts';
 
-export function Viewport({ layout, capture, selected, onSelect }: { layout: Layout; capture: CameraPose | null; selected: string | null; onSelect: (id: string | null) => void }) {
+export function Viewport({ layout, capture, selected, onSelect, background = '#eef0f3' }: { layout: Layout; capture: CameraPose | null; selected: string | null; onSelect: (id: string | null) => void; background?: string }) {
   const host = useRef<HTMLDivElement>(null);
   const ctx = useRef<{ renderer: THREE.WebGLRenderer; scene: THREE.Scene; camera: THREE.PerspectiveCamera; controls: OrbitControls; group: THREE.Group } | null>(null);
 
@@ -22,7 +22,7 @@ export function Viewport({ layout, capture, selected, onSelect }: { layout: Layo
     renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
     el.appendChild(renderer.domElement);
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color('#eef0f3');
+    scene.background = new THREE.Color(background);
     scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8a8a, 1.6));
     const sun = new THREE.DirectionalLight(0xffffff, 1.6);
     sun.position.set(4, 8, 6);

@@ -47,8 +47,8 @@ export function Studio(props: StudioProps) {
       .catch((e: unknown) => { if (live) setError(e instanceof Error ? e.message : String(e)); });
     return () => { live = false; };
   }, [props.stageId]);
-  if (error) return <div className="center error">无法打开 World：{error} <a {...linkProps('/canvas')}>返回画布</a></div>;
-  if (!chat) return <div className="center muted">加载 World…</div>;
+  if (error) return <div className="center error">无法打开导演台：{error} <a {...linkProps('/canvas')}>返回画布</a></div>;
+  if (!chat) return <div className="center muted">加载导演台…</div>;
   return <StudioEditor {...props} initialChat={chat.chat} fresh={chat.empty} coverAt={chat.coverAt} />;
 }
 
@@ -337,8 +337,8 @@ function StudioEditor({ stageId, nodeId, live, agentModel, initialChat, fresh, c
 
           {/* Top left: the app pill */}
           <div className="float pill-group top-left">
-            <a className="pill brand" {...linkProps('/canvas')} title="回到画布"><span className="brand-name">World</span></a>
-            <button className="pill icon" onClick={() => setHistory(true)} title="历史 World：打开、加载或复制以前的 World"><Icon name="history" /></button>
+            <a className="pill brand" {...linkProps('/canvas')} title="回到画布"><span className="brand-name">导演台</span></a>
+            <button className="pill icon" onClick={() => setHistory(true)} title="历史导演台：打开、加载或复制以前的导演台"><Icon name="history" /></button>
             <div className="pill title-pill">
               <input className="title-input" value={doc.title} onChange={(e) => update((d) => ({ ...d, title: e.target.value }))} />
               <span className={`save-dot ${store.saveStatus}`} title={SAVE_LABEL[store.saveStatus]} />
@@ -366,7 +366,7 @@ function StudioEditor({ stageId, nodeId, live, agentModel, initialChat, fresh, c
           {!doc.scene && !doc.characters.length && (
             <div className="empty-hint">
               <Icon name="globe" size={28} />
-              <strong>这是一个新的 World</strong>
+              <strong>这是一个新的导演台</strong>
               <span>在右侧告诉 Agent 你想拍什么，它会选场景、放角色、编排动作、架好镜头。<br />也可以从左侧 ＋ 打开素材库自己搭。</span>
             </div>
           )}
@@ -455,7 +455,7 @@ function StudioEditor({ stageId, nodeId, live, agentModel, initialChat, fresh, c
           <div className="drawer-box">
             <header className="drawer-head">
               <Icon name="history" size={20} />
-              <h2>历史 World</h2>
+              <h2>历史导演台</h2>
               <div className="spacer" />
               <button className="pill sm icon" onClick={() => setHistory(false)} title="关闭"><Icon name="x" size={16} /></button>
             </header>

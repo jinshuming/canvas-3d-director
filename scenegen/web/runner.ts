@@ -57,4 +57,5 @@ export function watchProject(projectId: string, onProject: (p: Project) => void,
 export const STAGE_LABEL: Record<string, string> = {
   start: '开始', conditions: '渲染白模', pano: '生成全景图', scale: '测量尺度', scene: 'JST-2 建环境', fill: '检测并补缺口', objects: 'SAM 3D 生成物体', compose: '合成', verify: '校验', done: '完成',
   probe: '读取视频', sample: '抽帧', colmap: 'COLMAP 估计位姿', normalise: '重力与尺度', select: '挑选视角', write: '写出图片+位姿', upload: '上传 JST-2',
+  stitch: '拼接锚点全景', complete: '补全视频没拍到的部分', retry: '重试', path: '沿视频路径生成视角', rebuild: 'JST-2 重建',
 };

@@ -49,7 +49,7 @@ export function WorldBrowser({ currentId, nodeId, onClose }: { currentId?: strin
       </div>
       {error && <p className="error">{error}</p>}
       {!worlds && !error && <p className="muted">加载中…</p>}
-      {shown && !shown.length && <p className="muted">{query ? '没有匹配的 World。' : '还没有 World。'}</p>}
+      {shown && !shown.length && <p className="muted">{query ? '没有匹配的导演台。' : '还没有导演台。'}</p>}
       <div className="wb-grid">
         {shown?.map((w) => {
           const current = w.id === currentId;
@@ -68,7 +68,7 @@ export function WorldBrowser({ currentId, nodeId, onClose }: { currentId?: strin
               </div>
               <div className="wb-actions">
                 <button className="pill sm" disabled={current || busy === w.id} onClick={() => open(w)}>{nodeId ? '加载' : '打开'}</button>
-                <button className="pill sm" disabled={busy === w.id} onClick={() => void copy(w)} title="以它为起点新建一个 World（对话从头开始）"><Icon name="copy" size={14} />复制</button>
+                <button className="pill sm" disabled={busy === w.id} onClick={() => void copy(w)} title="以它为起点新建一个导演台（对话从头开始）"><Icon name="copy" size={14} />复制</button>
                 <button className="pill sm icon danger" disabled={current || busy === w.id} onClick={() => void remove(w)} title="移到回收站"><Icon name="trash" size={14} /></button>
               </div>
             </article>
