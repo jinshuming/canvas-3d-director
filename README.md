@@ -2,6 +2,8 @@
 
 一个通用的 3D 导演台（World）。场景（splat）、角色（vsplat）和动作（motion glb）都用 Viggle 生成。可以手动搭戏，也可以用自然语言让 Agent 搭：放角色、编排动作和走位、架机位、设计运镜，最后导出画面和视频。
 
+> **给 agent / 新接手的人：** 先读 [AGENTS.md](AGENTS.md)。场景生成模块（文本 / 图片 → 白模 → GPT 全景图 → 3DGS）见 [scenegen/PIPELINE.md](scenegen/PIPELINE.md)。
+
 ```bash
 npm install
 cp .env.example .env.local   # 填上 key，见下文

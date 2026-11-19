@@ -92,6 +92,9 @@ export async function requestSpec(input: { text: string; images: string[]; pictu
       input: [{ role: 'user', content: [{ type: 'input_text', text: [input.text.trim() || 'Build this place.', lead].filter(Boolean).join('\n\n') }, ...pictures.map((u) => ({ type: 'input_image', image_url: u }))] }],
       text: { format: { type: 'json_schema', name: 'layout', schema: LAYOUT_SCHEMA, strict: true } },
     }),
+  }).catch((e: unknown) => {
+    const why = e instanceof Error ? (e.cause as { code?: string } | undefined)?.code ?? e.message : String(e);
+    throw Object.assign(new Error(`Could not reach OpenAI (${why}). Behind a proxy? Start the server with NODE_USE_ENV_PROXY=1 HTTPS_PROXY=<proxy url>.`), { status: 502 });
   });
   const body = await res.json().catch(() => null) as { output?: Array<{ type: string; content?: Array<{ type: string; text?: string }> }>; error?: { message?: string } } | null;
   if (!res.ok) throw Object.assign(new Error(body?.error?.message ?? `OpenAI ${res.status}`), { status: res.status === 401 ? 502 : res.status });

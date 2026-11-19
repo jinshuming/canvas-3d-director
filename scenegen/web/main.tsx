@@ -1,3 +1,4 @@
+/** The /scenegen/ batch test page: project list on the left, TextProject / VideoProject on the right. Shared client code is in api.ts and runner.ts (README.md in this folder). */
 import { useCallback, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 
